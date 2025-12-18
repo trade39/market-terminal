@@ -74,7 +74,6 @@ def get_daily_data(ticker):
 def get_intraday_data(ticker):
     """Fetches 15m Intraday Data (Last 5 Days) for VWAP & Momentum"""
     try:
-        # yfinance allows 15m data for last 60 days. We grab 5 days.
         data = yf.download(ticker, period="5d", interval="15m", progress=False)
         return data
     except Exception:
@@ -108,7 +107,6 @@ def get_fred_data(api_key, series_id):
 def calculate_vwap(df):
     """Calculates Rolling VWAP for the fetched period"""
     if df.empty: return df
-    # Typical Price
     df['TP'] = (df['High'] + df['Low'] + df['Close']) / 3
     df['TPV'] = df['TP'] * df['Volume']
     df['CumTPV'] = df['TPV'].cumsum()
@@ -123,14 +121,6 @@ def calculate_rsi(series, period=14):
     loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
     rs = gain / loss
     return 100 - (100 / (1 + rs))
-
-def get_timeframe_trend(df, period_str):
-    """Determines trend based on SMA crossover logic for Heatmap"""
-    if df.empty: return "Neutral"
-    # Simple logic: Is Close > SMA(20)?
-    sma20 = df['Close'].rolling(window=20).mean().iloc[-1]
-    curr = df['Close'].iloc[-1]
-    return "Bullish" if curr > sma20 else "Bearish"
 
 # --- EXISTING FEATURES (Monte Carlo, Macro, Correlation) ---
 @st.cache_data(ttl=3600)
@@ -239,13 +229,12 @@ if not daily_data.empty:
     fig.update_layout(height=400, template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', xaxis_rangeslider_visible=False, yaxis2=dict(overlaying="y", side="right", showgrid=False))
     st.plotly_chart(fig, use_container_width=True)
 
-# --- 2. ⚡ INTRADAY PRO DASHBOARD (NEW) ---
+# --- 2. ⚡ INTRADAY PRO DASHBOARD ---
 st.markdown("---")
 st.subheader("⚡ Intraday Pro Dashboard")
 
 if not intraday_data.empty and not daily_data.empty:
-    # A. Data Processing
-    # Handle MultiIndex for Intraday
+    # Handle MultiIndex
     if isinstance(intraday_data.columns, pd.MultiIndex):
         i_close = intraday_data['Close'].iloc[:, 0]
         i_high = intraday_data['High'].iloc[:, 0]
@@ -254,62 +243,44 @@ if not intraday_data.empty and not daily_data.empty:
     else:
         i_close, i_high, i_low, i_vol = intraday_data['Close'], intraday_data['High'], intraday_data['Low'], intraday_data['Volume']
 
-    # VWAP Calculation
+    # Calculations
     df_vwap = pd.DataFrame({'High': i_high, 'Low': i_low, 'Close': i_close, 'Volume': i_vol})
     df_vwap = calculate_vwap(df_vwap)
     current_vwap = df_vwap['VWAP'].iloc[-1]
     current_price = i_close.iloc[-1]
-    
-    # RSI Calculation
     rsi_val = calculate_rsi(i_close).iloc[-1]
     
-    # Gap Calculation (Today Open vs Yest Close)
     yest_close = close.iloc[-2]
     today_open = open_p.iloc[-1]
     gap_pct = ((today_open - yest_close) / yest_close) * 100
     
-    # Heatmap Trends (Resampling)
-    # 15m Trend
+    # Trends
     trend_15m = "Bullish" if current_price > i_close.rolling(20).mean().iloc[-1] else "Bearish"
-    # 1H Trend (Resample)
     df_1h = df_vwap.resample('1h').agg({'Close': 'last'})
     trend_1h = "Bullish" if df_1h['Close'].iloc[-1] > df_1h['Close'].rolling(20).mean().iloc[-1] else "Bearish"
-    # 4H Trend
     df_4h = df_vwap.resample('4h').agg({'Close': 'last'})
     trend_4h = "Bullish" if df_4h['Close'].iloc[-1] > df_4h['Close'].rolling(20).mean().iloc[-1] else "Bearish"
 
-    # B. Dashboard Layout
+    # Dashboard
     col_dash1, col_dash2, col_dash3 = st.columns([1.5, 1, 1.5])
     
-    # Section 1: Bias Meter (VWAP + RSI)
     with col_dash1:
         st.markdown("**1. Intraday Bias Meter**")
         bias = "NEUTRAL"
         if current_price > current_vwap and rsi_val > 50: bias = "BULLISH"
         elif current_price < current_vwap and rsi_val < 50: bias = "BEARISH"
-        
         bias_color = "bullish" if bias == "BULLISH" else "bearish" if bias == "BEARISH" else "neutral"
         st.markdown(f"### <span class='{bias_color}'>{bias}</span>", unsafe_allow_html=True)
         st.caption(f"Price vs VWAP: {'Above' if current_price > current_vwap else 'Below'} | RSI(14): {rsi_val:.1f}")
         
-    # Section 2: Gap Analysis
     with col_dash2:
         st.markdown("**2. Opening Gap**")
-        st.metric("Overnight Gap", f"{gap_pct:.2f}%", delta=None)
-        if abs(gap_pct) > 0.3:
-            st.info("High Volatility Open" if abs(gap_pct) > 0.5 else "Standard Gap")
-        else:
-            st.caption("Flat Open (No major gap)")
-            
-    # Section 3: Multi-Timeframe Heatmap
+        st.metric("Overnight Gap", f"{gap_pct:.2f}%")
+        
     with col_dash3:
         st.markdown("**3. Multi-Timeframe Momentum**")
-        
-        # Using columns to create a "badge" look
         hm1, hm2, hm3 = st.columns(3)
-        
         def get_arrow(trend): return "🟢 ⬆" if trend == "Bullish" else "🔴 ⬇"
-        
         with hm1: 
             st.caption("15 Min")
             st.markdown(get_arrow(trend_15m))
@@ -320,7 +291,7 @@ if not intraday_data.empty and not daily_data.empty:
             st.caption("4 Hour")
             st.markdown(get_arrow(trend_4h))
 else:
-    st.warning("Intraday data unavailable. (Market might be closed or API limit reached)")
+    st.warning("Intraday data unavailable.")
 
 # --- 3. MACRO CONTEXT ---
 st.markdown("---")
@@ -349,22 +320,50 @@ if not daily_data.empty:
     fig_pred.update_layout(height=400, template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
     st.plotly_chart(fig_pred, use_container_width=True)
 
-# --- 5. CORRELATIONS ---
+# --- 5. CORRELATIONS & SENTIMENT (RESTORED) ---
 st.markdown("---")
-st.subheader("🌐 DXY Correlation Matrix")
+st.subheader("🌐 DXY Correlation Matrix & Sentiment")
 corr_data = get_correlation_data()
 if not corr_data.empty:
     cm1, cm2 = st.columns(2)
+    corr_matrix = corr_data.corr()
+    
     with cm1:
-        fig_heat = px.imshow(corr_data.corr(), text_auto=True, color_continuous_scale='RdBu_r', aspect="auto")
+        fig_heat = px.imshow(corr_matrix, text_auto=True, color_continuous_scale='RdBu_r', aspect="auto")
         fig_heat.update_layout(template="plotly_dark", height=400, paper_bgcolor='rgba(0,0,0,0)')
         st.plotly_chart(fig_heat, use_container_width=True)
+        
     with cm2:
         norm_data = (corr_data / corr_data.iloc[0] - 1) * 100
         fig_s = go.Figure()
-        for c in norm_data.columns: fig_s.add_trace(go.Scatter(x=norm_data.index, y=norm_data[c], name=c))
+        for c in norm_data.columns: 
+            width = 3 if "DXY" in c else 1.5
+            fig_s.add_trace(go.Scatter(x=norm_data.index, y=norm_data[c], name=c, line=dict(width=width)))
         fig_s.update_layout(template="plotly_dark", height=400, paper_bgcolor='rgba(0,0,0,0)')
         st.plotly_chart(fig_s, use_container_width=True)
+
+    # --- RESTORED TEXT CONTEXT LOGIC ---
+    st.markdown("#### 🧠 Correlation Context")
+    dxy_name = "US Dollar Index (DXY)"
+    if dxy_name in corr_matrix.columns:
+        dxy_corrs = corr_matrix[dxy_name].drop(dxy_name)
+        strongest_inv = dxy_corrs.idxmin()
+        val_inv = dxy_corrs.min()
+        strongest_dir = dxy_corrs.idxmax()
+        val_dir = dxy_corrs.max()
+        
+        sentiment_text = f"""
+        **Market Structure:**
+        * **Strongest Inverse:** **{strongest_inv}** (Corr: `{val_inv:.2f}`). {'Classic "Safe Haven" dynamic.' if 'Gold' in strongest_inv else 'Capital rotation active.'}
+        * **Strongest Direct:** **{strongest_dir}** (Corr: `{val_dir:.2f}`).
+        
+        **Interpretation:**
+        """
+        if val_inv < -0.7: sentiment_text += " **Strong Dollar Flows.** Risk assets are reacting heavily to DXY moves."
+        elif abs(val_inv) < 0.3: sentiment_text += " **Decoupled Market.** Assets are moving on their own news, ignoring the Dollar."
+        else: sentiment_text += " Mixed regime. Watch DXY levels for direction."
+        
+        st.info(sentiment_text)
 
 # --- 6. NEWS & AI ---
 st.markdown("---")
