@@ -36,7 +36,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- CONSTANTS & MAPPINGS (UPDATED WITH CORRELATION LOGIC) ---
+# --- CONSTANTS & MAPPINGS ---
 ASSETS = {
     "Gold (Comex)": {
         "ticker": "GC=F", 
@@ -116,7 +116,7 @@ def get_fred_data(api_key, series_id):
     except Exception:
         return None
 
-# --- NEW: MONTE CARLO PREDICTION ---
+# --- MONTE CARLO PREDICTION ---
 def generate_monte_carlo(stock_data, days=126, simulations=50):
     """
     Generates Monte Carlo simulations for price prediction using Geometric Brownian Motion.
@@ -150,7 +150,7 @@ def generate_monte_carlo(stock_data, days=126, simulations=50):
         
     return prediction_dates, price_paths
 
-# --- NEW: MACRO SIGNAL ANALYZER ---
+# --- MACRO SIGNAL ANALYZER ---
 def analyze_macro_signal(macro_df, correlation_type):
     """
     Determines Bullish/Bearish based on 30-day macro trend and correlation.
@@ -223,7 +223,7 @@ stock_data = get_market_data(asset_info['ticker'])
 macro_df = get_fred_data(fred_key, asset_info['fred_series'])
 
 if not stock_data.empty:
-    # --- TOP METRICS ---
+    # --- 1. TOP METRICS & CHART ---
     if isinstance(stock_data.columns, pd.MultiIndex):
         close = stock_data['Close'].iloc[:, 0]
         high = stock_data['High'].iloc[:, 0]
@@ -244,7 +244,7 @@ if not stock_data.empty:
     c3.metric("Low", f"{low.min():,.2f}")
     c4.metric("Vol", f"{(close.pct_change().std()* (252**0.5)*100):.2f}%")
 
-    # --- MAIN CHART ---
+    # Main Chart
     fig = go.Figure()
     fig.add_trace(go.Candlestick(x=stock_data.index, open=open_p, high=high, low=low, close=close, name="Price"))
     
@@ -255,30 +255,34 @@ if not stock_data.empty:
     fig.update_layout(height=500, template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', xaxis_rangeslider_visible=False, yaxis2=dict(overlaying="y", side="right", showgrid=False))
     st.plotly_chart(fig, use_container_width=True)
 
-# --- 2. MACRO CONTEXT & SIGNAL ---
+# --- 2. MACRO CONTEXT & SIGNAL (UPDATED LAYOUT) ---
 st.markdown("---")
 st.subheader("🏛️ Macro Data & Signal")
 
-col_m1, col_m2 = st.columns([1, 2])
+if isinstance(macro_df, pd.DataFrame) and not macro_df.empty:
+    # 1. Calculate Signal
+    signal, reason = analyze_macro_signal(macro_df, asset_info['correlation'])
+    color_class = "bullish" if signal == "BULLISH" else "bearish" if signal == "BEARISH" else "neutral"
 
-with col_m1:
-    if isinstance(macro_df, pd.DataFrame) and not macro_df.empty:
-        # Calculate Signal
-        signal, reason = analyze_macro_signal(macro_df, asset_info['correlation'])
-        
-        # Color coding for badge
-        color_class = "bullish" if signal == "BULLISH" else "bearish" if signal == "BEARISH" else "neutral"
-        
+    # 2. Display Text & Metrics (Organized horizontally ABOVE the chart)
+    # We use columns here just to organize the text neatly side-by-side
+    text_col1, text_col2, text_col3 = st.columns([1, 2, 1])
+    
+    with text_col1:
         st.markdown(f"#### Signal: <span class='{color_class}'>{signal}</span>", unsafe_allow_html=True)
-        st.write(f"**Driver:** {asset_info['fred_label']}")
-        st.caption(reason)
+        
+    with text_col2:
+        st.markdown(f"**Driver:** {asset_info['fred_label']}")
+        st.caption(f"{reason}")
+        
+    with text_col3:
         st.metric("Latest Macro Reading", f"{macro_df['Value'].iloc[-1]:.2f}")
-    else:
-        st.warning("Macro data unavailable (Check API Key).")
 
-with col_m2:
-    if isinstance(macro_df, pd.DataFrame) and not macro_df.empty:
-        st.line_chart(macro_df['Value'].tail(100), color="#d4af37")
+    # 3. Display Chart (Full Width BELOW the text)
+    st.line_chart(macro_df['Value'].tail(100), color="#d4af37")
+
+else:
+    st.warning("Macro data unavailable (Check API Key).")
 
 # --- 3. PRICE PREDICTION (VOLATILITY DRIFT) ---
 st.markdown("---")
