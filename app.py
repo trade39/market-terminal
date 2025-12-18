@@ -116,11 +116,13 @@ def get_fred_data(api_key, series_id):
     except Exception:
         return None
 
-# --- MONTE CARLO PREDICTION ---
-def generate_monte_carlo(stock_data, days=126, simulations=50):
+# --- MONTE CARLO PREDICTION (UPDATED TO 10K) ---
+@st.cache_data(ttl=3600) # Cache simulation for 1 hour to save performance
+def generate_monte_carlo(stock_data, days=126, simulations=10000):
     """
     Generates Monte Carlo simulations for price prediction using Geometric Brownian Motion.
     days = 126 (approx 6 months)
+    simulations = 10,000
     """
     # 1. Calculate historical metrics
     if isinstance(stock_data.columns, pd.MultiIndex):
@@ -255,7 +257,7 @@ if not stock_data.empty:
     fig.update_layout(height=500, template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', xaxis_rangeslider_visible=False, yaxis2=dict(overlaying="y", side="right", showgrid=False))
     st.plotly_chart(fig, use_container_width=True)
 
-# --- 2. MACRO CONTEXT & SIGNAL (UPDATED LAYOUT) ---
+# --- 2. MACRO CONTEXT & SIGNAL ---
 st.markdown("---")
 st.subheader("🏛️ Macro Data & Signal")
 
@@ -264,8 +266,7 @@ if isinstance(macro_df, pd.DataFrame) and not macro_df.empty:
     signal, reason = analyze_macro_signal(macro_df, asset_info['correlation'])
     color_class = "bullish" if signal == "BULLISH" else "bearish" if signal == "BEARISH" else "neutral"
 
-    # 2. Display Text & Metrics (Organized horizontally ABOVE the chart)
-    # We use columns here just to organize the text neatly side-by-side
+    # 2. Display Text & Metrics
     text_col1, text_col2, text_col3 = st.columns([1, 2, 1])
     
     with text_col1:
@@ -278,7 +279,7 @@ if isinstance(macro_df, pd.DataFrame) and not macro_df.empty:
     with text_col3:
         st.metric("Latest Macro Reading", f"{macro_df['Value'].iloc[-1]:.2f}")
 
-    # 3. Display Chart (Full Width BELOW the text)
+    # 3. Display Chart
     st.line_chart(macro_df['Value'].tail(100), color="#d4af37")
 
 else:
@@ -287,10 +288,11 @@ else:
 # --- 3. PRICE PREDICTION (VOLATILITY DRIFT) ---
 st.markdown("---")
 st.subheader("🔮 6-Month Volatility Drift Prediction")
-st.caption("Monte Carlo Simulation (Geometric Brownian Motion) - 50 Scenarios")
+st.caption("Monte Carlo Simulation (Geometric Brownian Motion) - 10,000 Scenarios (100 Sample Paths Visualized)")
 
 if not stock_data.empty:
-    pred_dates, pred_paths = generate_monte_carlo(stock_data)
+    with st.spinner("Calculating 10,000 simulations..."):
+        pred_dates, pred_paths = generate_monte_carlo(stock_data, simulations=10000)
     
     # Prediction Chart
     fig_pred = go.Figure()
@@ -299,21 +301,22 @@ if not stock_data.empty:
     hist_slice = close.tail(90)
     fig_pred.add_trace(go.Scatter(x=hist_slice.index, y=hist_slice.values, name='Historical', line=dict(color='white', width=2)))
     
-    # 2. Simulations (Faint lines)
-    for i in range(pred_paths.shape[1]):
+    # 2. Simulations (Faint lines) - Visualize only 100 to prevent browser crash
+    # The math uses 10,000, but we only draw 100 lines for the "visual cone"
+    for i in range(100): 
         fig_pred.add_trace(go.Scatter(
             x=pred_dates, 
             y=pred_paths[:, i], 
             mode='lines', 
             line=dict(color='cyan', width=1), 
-            opacity=0.1, 
+            opacity=0.05, # Lower opacity for better layering
             showlegend=False, 
             hoverinfo='skip'
         ))
         
-    # 3. Mean Prediction Line
+    # 3. Mean Prediction Line (Derived from all 10,000 runs)
     mean_path = np.mean(pred_paths, axis=1)
-    fig_pred.add_trace(go.Scatter(x=pred_dates, y=mean_path, name='Avg Projection', line=dict(color='cyan', width=3, dash='dash')))
+    fig_pred.add_trace(go.Scatter(x=pred_dates, y=mean_path, name='Avg Projection (10k Run)', line=dict(color='#00ff00', width=3, dash='dash')))
 
     fig_pred.update_layout(height=400, template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', showlegend=True)
     st.plotly_chart(fig_pred, use_container_width=True)
