@@ -4,6 +4,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from fredapi import Fred
 from newsapi import NewsApiClient
+import google.generativeai as genai
 from datetime import datetime, timedelta
 
 # --- APP CONFIGURATION ---
@@ -12,9 +13,7 @@ st.set_page_config(layout="wide", page_title="Market Terminal", page_icon="📈"
 # Custom CSS for "Terminal" feel
 st.markdown("""
 <style>
-    .stApp {
-        background-color: #0e1117;
-    }
+    .stApp { background-color: #0e1117; }
     .metric-container {
         background-color: #1e1e1e;
         border: 1px solid #333;
@@ -22,12 +21,13 @@ st.markdown("""
         border-radius: 5px;
         text-align: center;
     }
-    /* Make metrics stand out against dark background */
-    [data-testid="stMetricValue"] {
-        color: #e0e0e0;
-    }
-    [data-testid="stMetricLabel"] {
-        color: #a0a0a0;
+    /* AI Sentiment Box */
+    .sentiment-box {
+        padding: 15px;
+        border-radius: 5px;
+        margin-bottom: 20px;
+        border-left: 5px solid #d4af37;
+        background-color: #262730;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -69,255 +69,181 @@ ASSETS = {
 # --- HELPER FUNCTIONS ---
 
 def get_api_key(key_name):
-    """
-    Tries to get API key from Streamlit secrets.
-    Checks both [api_keys] section and top-level for robustness.
-    """
-    # Check 1: Inside [api_keys] section (Best Practice)
+    """Robustly retrieve API keys from secrets."""
+    # Check 1: Inside [api_keys] section
     if "api_keys" in st.secrets and key_name in st.secrets["api_keys"]:
         return st.secrets["api_keys"][key_name]
-    
-    # Check 2: Top level (Fallback)
+    # Check 2: Top level
     if key_name in st.secrets:
         return st.secrets[key_name]
-        
     return None
 
-@st.cache_data(ttl=60)  # Cache market data for 1 minute
+@st.cache_data(ttl=60)
 def get_market_data(ticker, period="1y", interval="1d"):
     try:
         data = yf.download(ticker, period=period, interval=interval, progress=False)
         return data
-    except Exception as e:
+    except Exception:
         return pd.DataFrame()
 
-@st.cache_data(ttl=300) # Cache news for 5 minutes
+@st.cache_data(ttl=300)
 def get_news(api_key, query):
-    if not api_key:
-        return None
+    if not api_key: return None
     try:
         newsapi = NewsApiClient(api_key=api_key)
-        # NewsAPI free tier limits: usually articles from last 30 days
         start_date = (datetime.now() - timedelta(days=28)).strftime('%Y-%m-%d')
-        
-        articles = newsapi.get_everything(
-            q=query, 
-            from_param=start_date, 
-            language='en', 
-            sort_by='publishedAt', 
-            page_size=6
-        )
+        articles = newsapi.get_everything(q=query, from_param=start_date, language='en', sort_by='relevancy', page_size=10)
         return articles['articles']
     except Exception as e:
-        return f"Error: {str(e)}"
+        return str(e)
 
-@st.cache_data(ttl=86400) # Cache FRED data for 24 hours (macro data is slow)
+@st.cache_data(ttl=86400)
 def get_fred_data(api_key, series_id):
-    if not api_key:
-        return None
+    if not api_key: return None
     try:
         fred = Fred(api_key=api_key)
         data = fred.get_series(series_id)
-        # Convert to DataFrame
         df = pd.DataFrame(data, columns=['Value'])
         df.index.name = 'Date'
-        # Filter to last 2 years to ensure context
         start_date = datetime.now() - timedelta(days=730)
         return df[df.index > start_date]
-    except Exception as e:
-        return f"Error fetching FRED data: {str(e)}"
+    except Exception:
+        return None
 
-# --- SIDEBAR & SETUP ---
+# --- NEW: GEMINI SENTIMENT ANALYSIS ---
+@st.cache_data(ttl=900) # Cache AI response for 15 mins to save quota
+def get_ai_sentiment(api_key, asset_name, news_items):
+    if not api_key or not news_items or isinstance(news_items, str):
+        return None
+    
+    try:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        
+        # Prepare the context for Gemini
+        headlines = [f"- {item['title']}" for item in news_items[:8]]
+        headlines_text = "\n".join(headlines)
+        
+        prompt = f"""
+        You are a financial analyst. Analyze the following recent news headlines for {asset_name}:
+        
+        {headlines_text}
+        
+        Provide a brief sentiment summary (max 50 words). 
+        Start with exactly one of these labels: **BULLISH**, **BEARISH**, or **NEUTRAL**, followed by your reasoning.
+        """
+        
+        response = model.generate_content(prompt)
+        return response.text
+    except Exception as e:
+        return f"AI Analysis Unavailable: {str(e)}"
+
+# --- SIDEBAR ---
 
 with st.sidebar:
     st.header("⚙️ Terminal Settings")
-    
     selected_asset = st.selectbox("Select Asset", list(ASSETS.keys()))
     asset_info = ASSETS[selected_asset]
     
     st.markdown("---")
     st.subheader("API Configuration")
     
-    # 1. Try to load keys from Secrets
     news_key = get_api_key("news_api_key")
     fred_key = get_api_key("fred_api_key")
+    google_key = get_api_key("google_api_key") # Look for Gemini key
 
-    # 2. Fallback to manual input if secrets are missing
-    if not news_key:
-        st.warning("NewsAPI Key not found in Secrets.")
-        news_key = st.text_input("Enter NewsAPI.org Key", type="password")
-    else:
-        st.success("NewsAPI Key loaded from Secrets ✅")
-    
-    if not fred_key:
-        st.warning("FRED API Key not found in Secrets.")
-        fred_key = st.text_input("Enter FRED API Key", type="password")
-    else:
-        st.success("FRED API Key loaded from Secrets ✅")
-    
-    st.markdown("---")
-    if st.button("Refresh Data / Clear Cache"):
+    # API Status Indicators
+    if news_key: st.success("NewsAPI: Connected")
+    else: st.warning("NewsAPI: Missing")
+        
+    if fred_key: st.success("FRED: Connected")
+    else: st.warning("FRED: Missing")
+        
+    if google_key: st.success("Gemini AI: Connected")
+    else: st.warning("Gemini AI: Missing (Optional)")
+
+    if st.button("Refresh Data"):
         st.cache_data.clear()
 
 # --- MAIN DASHBOARD ---
 
 st.title(f"📊 {selected_asset} Professional Terminal")
-st.markdown(f"**Ticker:** `{asset_info['ticker']}` | **Macro Indicator:** `{asset_info['fred_label']}`")
 
 # 1. Fetch Market Data
 stock_data = get_market_data(asset_info['ticker'])
 macro_df = get_fred_data(fred_key, asset_info['fred_series'])
 
 if not stock_data.empty:
-    # 2. Calculate Top Level Metrics
-    try:
-        # Handle cases where yfinance returns MultiIndex columns
-        if isinstance(stock_data.columns, pd.MultiIndex):
-            close_series = stock_data['Close'].iloc[:, 0]
-            high_val = stock_data['High'].iloc[:, 0].max()
-            low_val = stock_data['Low'].iloc[:, 0].min()
-            open_series = stock_data['Open'].iloc[:, 0]
-            high_series = stock_data['High'].iloc[:, 0]
-            low_series = stock_data['Low'].iloc[:, 0]
-        else:
-            close_series = stock_data['Close']
-            high_val = stock_data['High'].max()
-            low_val = stock_data['Low'].min()
-            open_series = stock_data['Open']
-            high_series = stock_data['High']
-            low_series = stock_data['Low']
+    # Handle MultiIndex if necessary
+    if isinstance(stock_data.columns, pd.MultiIndex):
+        close = stock_data['Close'].iloc[:, 0]
+        high = stock_data['High'].iloc[:, 0]
+        low = stock_data['Low'].iloc[:, 0]
+        open_p = stock_data['Open'].iloc[:, 0]
+    else:
+        close, high, low, open_p = stock_data['Close'], stock_data['High'], stock_data['Low'], stock_data['Open']
 
-        current_price = close_series.iloc[-1]
-        prev_close = close_series.iloc[-2]
-        delta = current_price - prev_close
-        pct_change = (delta / prev_close) * 100
-        
-        # Display Metrics
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Price", f"{current_price:,.2f}", f"{delta:,.2f} ({pct_change:.2f}%)")
-        col2.metric("52W High", f"{high_val:,.2f}")
-        col3.metric("52W Low", f"{low_val:,.2f}")
-        
-        # Calculate Volatility (Standard Deviation of last 30 days)
-        volatility = close_series.pct_change().tail(30).std() * (252**0.5) * 100
-        col4.metric("30D Volatility (Ann.)", f"{volatility:.2f}%")
+    # Metrics
+    curr_price = close.iloc[-1]
+    change = curr_price - close.iloc[-2]
+    pct = (change / close.iloc[-2]) * 100
+    
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Price", f"{curr_price:,.2f}", f"{change:,.2f} ({pct:.2f}%)")
+    c2.metric("High", f"{high.max():,.2f}")
+    c3.metric("Low", f"{low.min():,.2f}")
+    c4.metric("Vol", f"{(close.pct_change().std()* (252**0.5)*100):.2f}%")
 
-        # 3. Main Chart Construction
-        fig = go.Figure()
+    # Chart
+    fig = go.Figure()
+    fig.add_trace(go.Candlestick(x=stock_data.index, open=open_p, high=high, low=low, close=close, name="Price"))
+    
+    if isinstance(macro_df, pd.DataFrame):
+        macro_aligned = macro_df.reindex(stock_data.index, method='ffill')
+        fig.add_trace(go.Scatter(x=macro_df.index, y=macro_df['Value'], name=asset_info['fred_label'], line=dict(color='#d4af37', width=2), yaxis="y2"))
 
-        # Candlestick Trace
-        fig.add_trace(go.Candlestick(
-            x=stock_data.index,
-            open=open_series,
-            high=high_series,
-            low=low_series,
-            close=close_series,
-            name="Price"
-        ))
+    fig.update_layout(height=500, template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', xaxis_rangeslider_visible=False, yaxis2=dict(overlaying="y", side="right", showgrid=False))
+    st.plotly_chart(fig, use_container_width=True)
 
-        # Macro Data Overlay (Secondary Y-Axis)
-        if isinstance(macro_df, pd.DataFrame) and not macro_df.empty:
-            # Reindex macro data to match stock data range
-            aligned_macro = macro_df.reindex(stock_data.index, method='ffill')
-            
-            fig.add_trace(go.Scatter(
-                x=macro_df.index,
-                y=macro_df['Value'],
-                name=asset_info['fred_label'],
-                line=dict(color='#d4af37', width=2), # Gold color for macro
-                opacity=0.7,
-                yaxis="y2"
-            ))
-
-        # Chart Layout
-        fig.update_layout(
-            height=600,
-            template="plotly_dark",
-            paper_bgcolor='rgba(0,0,0,0)',
-            plot_bgcolor='rgba(0,0,0,0)',
-            xaxis_rangeslider_visible=False,
-            hovermode="x unified",
-            yaxis=dict(
-                title="Asset Price",
-                showgrid=True, 
-                gridcolor='#333'
-            ),
-            yaxis2=dict(
-                title="Macro Data",
-                overlaying="y",
-                side="right",
-                showgrid=False
-            ),
-            legend=dict(
-                orientation="h", 
-                yanchor="bottom", 
-                y=1.02, 
-                xanchor="right", 
-                x=1
-            )
-        )
-        st.plotly_chart(fig, use_container_width=True)
-
-    except Exception as e:
-        st.error(f"Error processing market data: {e}")
-
-else:
-    st.error("Unable to load market data. The API might be down or the ticker is invalid.")
-
-# --- NEW LAYOUT: MACRO DATA (FULL WIDTH) ---
+# 2. Macro Section
 st.markdown("---")
 st.subheader("🏛️ Macro Data Context")
-
-if fred_key:
-    if isinstance(macro_df, pd.DataFrame) and not macro_df.empty:
-        # Layout for Macro: Metric on Left, Chart on Right
-        m_col1, m_col2 = st.columns([1, 3])
-        
-        with m_col1:
-            curr_macro = macro_df['Value'].iloc[-1]
-            prev_macro = macro_df['Value'].iloc[-2]
-            st.metric(
-                label="Latest Reading", 
-                value=f"{curr_macro:,.2f}", 
-                delta=f"{curr_macro - prev_macro:,.2f}"
-            )
-            st.markdown(f"**Indicator:** {asset_info['fred_label']}")
-            
-            # Context helper text
-            if "Gold" in selected_asset:
-                st.info("💡 Gold often moves inversely to real yields.")
-            elif "S&P" in selected_asset:
-                st.info("💡 Tracks Central Bank Liquidity.")
-            elif "EUR" in selected_asset or "GBP" in selected_asset:
-                st.info("💡 Driven by interest rate differentials.")
-                
-        with m_col2:
-            st.line_chart(macro_df['Value'].tail(100))
-    else:
-        st.warning("Macro data unavailable for this selection or API key is invalid.")
+if isinstance(macro_df, pd.DataFrame) and not macro_df.empty:
+    m1, m2 = st.columns([1, 3])
+    m1.metric("Latest Macro Reading", f"{macro_df['Value'].iloc[-1]:.2f}")
+    m1.info(f"Indicator: {asset_info['fred_label']}")
+    m2.line_chart(macro_df['Value'].tail(100))
 else:
-    st.info("⚠️ Enter FRED API Key to view macro-economic context.")
+    st.warning("Macro data unavailable (Check API Key).")
 
-# --- NEW LAYOUT: MARKET INTELLIGENCE (FULL WIDTH) ---
+# 3. News & AI Sentiment Section
 st.markdown("---")
-st.subheader("📰 Market Intelligence")
+st.subheader("📰 Market Intelligence & AI Analysis")
 
 if news_key:
     news_data = get_news(news_key, asset_info['news_query'])
-    if isinstance(news_data, list) and len(news_data) > 0:
-        # Create a grid for news items (3 columns)
+    
+    # --- AI SENTIMENT BLOCK ---
+    if google_key and isinstance(news_data, list):
+        with st.spinner("Gemini is analyzing market sentiment..."):
+            sentiment = get_ai_sentiment(google_key, selected_asset, news_data)
+            if sentiment:
+                st.markdown(f"""
+                <div class="sentiment-box">
+                    <h4>🤖 Gemini AI Sentiment Analysis</h4>
+                    <p style="font-size: 1.1em;">{sentiment}</p>
+                </div>
+                """, unsafe_allow_html=True)
+    # --------------------------
+
+    if isinstance(news_data, list):
         news_cols = st.columns(3)
-        for i, article in enumerate(news_data):
-            # cycle through columns 0, 1, 2
-            with news_cols[i % 3]: 
+        for i, article in enumerate(news_data[:6]):
+            with news_cols[i % 3]:
                 with st.container(border=True):
                     st.markdown(f"**[{article['title']}]({article['url']})**")
                     st.caption(f"{article['source']['name']} • {article['publishedAt'][:10]}")
-                    if article['description']:
-                        st.write(article['description'][:100] + "...")
-    elif isinstance(news_data, str):
-        st.error(news_data)
     else:
-        st.info("No recent news found for this asset.")
+        st.error(f"News Error: {news_data}")
 else:
-    st.info("⚠️ Enter NewsAPI Key to view live headlines.")
+    st.info("Enter NewsAPI Key to view news and AI analysis.")
