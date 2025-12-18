@@ -71,10 +71,16 @@ ASSETS = {
 def get_api_key(key_name):
     """
     Tries to get API key from Streamlit secrets.
-    Returns None if not found.
+    Checks both [api_keys] section and top-level for robustness.
     """
+    # Check 1: Inside [api_keys] section (Best Practice)
     if "api_keys" in st.secrets and key_name in st.secrets["api_keys"]:
         return st.secrets["api_keys"][key_name]
+    
+    # Check 2: Top level (Fallback)
+    if key_name in st.secrets:
+        return st.secrets[key_name]
+        
     return None
 
 @st.cache_data(ttl=60)  # Cache market data for 1 minute
@@ -160,6 +166,7 @@ st.markdown(f"**Ticker:** `{asset_info['ticker']}` | **Macro Indicator:** `{asse
 
 # 1. Fetch Market Data
 stock_data = get_market_data(asset_info['ticker'])
+macro_df = get_fred_data(fred_key, asset_info['fred_series'])
 
 if not stock_data.empty:
     # 2. Calculate Top Level Metrics
@@ -209,11 +216,8 @@ if not stock_data.empty:
         ))
 
         # Macro Data Overlay (Secondary Y-Axis)
-        macro_df = get_fred_data(fred_key, asset_info['fred_series'])
-        
         if isinstance(macro_df, pd.DataFrame) and not macro_df.empty:
-            # Reindex macro data to match stock data range for cleaner plotting
-            # Forward fill simply to make the line continuous if dates don't perfectly align
+            # Reindex macro data to match stock data range
             aligned_macro = macro_df.reindex(stock_data.index, method='ffill')
             
             fig.add_trace(go.Scatter(
@@ -260,56 +264,60 @@ if not stock_data.empty:
 else:
     st.error("Unable to load market data. The API might be down or the ticker is invalid.")
 
-# 4. News and Macro Details Section
+# --- NEW LAYOUT: MACRO DATA (FULL WIDTH) ---
 st.markdown("---")
-col_news, col_macro = st.columns([2, 1])
+st.subheader("🏛️ Macro Data Context")
 
-with col_news:
-    st.subheader("📰 Market Intelligence")
-    if news_key:
-        news_data = get_news(news_key, asset_info['news_query'])
-        if isinstance(news_data, list) and len(news_data) > 0:
-            for article in news_data:
-                with st.container():
-                    # Clickable title
-                    st.markdown(f"**[{article['title']}]({article['url']})**")
-                    col_src, col_date = st.columns([1, 1])
-                    col_src.caption(f"Source: {article['source']['name']}")
-                    col_date.caption(f"Published: {article['publishedAt'][:10]}")
-                    st.divider() # Thin line between articles
-        elif isinstance(news_data, str):
-            st.error(news_data)
-        else:
-            st.info("No recent news found for this asset.")
-    else:
-        st.info("⚠️ Enter NewsAPI Key to view live headlines.")
-
-with col_macro:
-    st.subheader("🏛️ Macro Data")
-    if fred_key:
-        if isinstance(macro_df, pd.DataFrame) and not macro_df.empty:
+if fred_key:
+    if isinstance(macro_df, pd.DataFrame) and not macro_df.empty:
+        # Layout for Macro: Metric on Left, Chart on Right
+        m_col1, m_col2 = st.columns([1, 3])
+        
+        with m_col1:
             curr_macro = macro_df['Value'].iloc[-1]
             prev_macro = macro_df['Value'].iloc[-2]
-            
             st.metric(
                 label="Latest Reading", 
                 value=f"{curr_macro:,.2f}", 
                 delta=f"{curr_macro - prev_macro:,.2f}"
             )
-            
             st.markdown(f"**Indicator:** {asset_info['fred_label']}")
-            st.markdown("**Why this matters:**")
             
-            # Context helper text based on asset
+            # Context helper text
             if "Gold" in selected_asset:
-                st.caption("Gold often moves inversely to real yields. Higher yields make non-interest bearing Gold less attractive.")
+                st.info("💡 Gold often moves inversely to real yields.")
             elif "S&P" in selected_asset:
-                st.caption("Central bank liquidity (Balance Sheet) is a key driver of equity asset inflation.")
+                st.info("💡 Tracks Central Bank Liquidity.")
             elif "EUR" in selected_asset or "GBP" in selected_asset:
-                st.caption("Currency pairs are heavily influenced by interest rate differentials between the two nations.")
+                st.info("💡 Driven by interest rate differentials.")
                 
-            st.line_chart(macro_df['Value'].tail(50))
-        else:
-            st.warning("Macro data unavailable for this selection.")
+        with m_col2:
+            st.line_chart(macro_df['Value'].tail(100))
     else:
-        st.info("⚠️ Enter FRED API Key to view macro-economic context.")
+        st.warning("Macro data unavailable for this selection or API key is invalid.")
+else:
+    st.info("⚠️ Enter FRED API Key to view macro-economic context.")
+
+# --- NEW LAYOUT: MARKET INTELLIGENCE (FULL WIDTH) ---
+st.markdown("---")
+st.subheader("📰 Market Intelligence")
+
+if news_key:
+    news_data = get_news(news_key, asset_info['news_query'])
+    if isinstance(news_data, list) and len(news_data) > 0:
+        # Create a grid for news items (3 columns)
+        news_cols = st.columns(3)
+        for i, article in enumerate(news_data):
+            # cycle through columns 0, 1, 2
+            with news_cols[i % 3]: 
+                with st.container(border=True):
+                    st.markdown(f"**[{article['title']}]({article['url']})**")
+                    st.caption(f"{article['source']['name']} • {article['publishedAt'][:10]}")
+                    if article['description']:
+                        st.write(article['description'][:100] + "...")
+    elif isinstance(news_data, str):
+        st.error(news_data)
+    else:
+        st.info("No recent news found for this asset.")
+else:
+    st.info("⚠️ Enter NewsAPI Key to view live headlines.")
