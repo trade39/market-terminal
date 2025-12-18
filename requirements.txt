@@ -4,3 +4,4 @@ pandas
 plotly
 fredapi
 newsapi-python
+google-generativeai
