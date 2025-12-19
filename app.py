@@ -8,361 +8,364 @@ from fredapi import Fred
 from newsapi import NewsApiClient
 import google.generativeai as genai
 from datetime import datetime, timedelta
-from scipy.interpolate import UnivariateSpline  # For Options Smoothing
+from scipy.interpolate import UnivariateSpline
 from scipy.stats import norm
 
 # --- APP CONFIGURATION ---
-st.set_page_config(layout="wide", page_title="Quant Terminal Pro", page_icon="🧠")
+st.set_page_config(layout="wide", page_title="Market Terminal Pro", page_icon="📈")
 
+# Custom CSS (Merged for both styles)
 st.markdown("""
 <style>
     .stApp { background-color: #0e1117; }
     .metric-container { background-color: #1e1e1e; border: 1px solid #333; padding: 10px; border-radius: 5px; text-align: center; }
-    .regime-box { padding: 15px; border-radius: 5px; margin-bottom: 20px; background-color: #262730; border-left: 5px solid; }
-    .regime-bull { border-color: #00ff00; }
-    .regime-bear { border-color: #ff4b4b; }
-    .regime-neutral { border-color: #d4af37; }
-    .vol-badge-go { background-color: rgba(0, 255, 0, 0.2); color: #00ff00; padding: 4px 10px; border-radius: 4px; font-weight: bold; }
-    .vol-badge-stop { background-color: rgba(255, 75, 75, 0.2); color: #ff4b4b; padding: 4px 10px; border-radius: 4px; font-weight: bold; }
+    .sentiment-box { padding: 15px; border-radius: 5px; margin-bottom: 20px; border-left: 5px solid #d4af37; background-color: #262730; }
+    
+    /* Signal badges */
+    .bullish { color: #00ff00; font-weight: bold; background-color: rgba(0, 255, 0, 0.1); padding: 2px 8px; border-radius: 4px; }
+    .bearish { color: #ff4b4b; font-weight: bold; background-color: rgba(255, 75, 75, 0.1); padding: 2px 8px; border-radius: 4px; }
+    .neutral { color: #cccccc; font-weight: bold; background-color: rgba(200, 200, 200, 0.1); padding: 2px 8px; border-radius: 4px; }
+    
+    /* New Volatility Badges */
+    .vol-go { background-color: rgba(0, 255, 0, 0.2); color: #00ff00; padding: 4px 10px; border-radius: 4px; font-weight: bold; border: 1px solid #00ff00; }
+    .vol-stop { background-color: rgba(255, 75, 75, 0.2); color: #ff4b4b; padding: 4px 10px; border-radius: 4px; font-weight: bold; border: 1px solid #ff4b4b; }
 </style>
 """, unsafe_allow_html=True)
 
-# --- CONSTANTS ---
+# --- CONSTANTS & MAPPINGS (Updated for Options) ---
+# Added 'opt_ticker' because indices (like ^GSPC) often don't have free option chains in yfinance, so we use the ETF proxy (SPY).
 ASSETS = {
-    "S&P 500": {"ticker": "^GSPC", "opt_ticker": "SPY", "news_query": "S&P 500"}, # Using SPY for options data availability
-    "NASDAQ": {"ticker": "^IXIC", "opt_ticker": "QQQ", "news_query": "Nasdaq"},
-    "Gold": {"ticker": "GC=F", "opt_ticker": "GLD", "news_query": "Gold Price"},
-    "NVIDIA": {"ticker": "NVDA", "opt_ticker": "NVDA", "news_query": "Nvidia stock"},
+    "S&P 500": {"ticker": "^GSPC", "opt_ticker": "SPY", "news_query": "S&P 500", "fred_series": "WALCL", "fred_label": "Fed Bal Sheet"},
+    "NASDAQ": {"ticker": "^IXIC", "opt_ticker": "QQQ", "news_query": "Nasdaq", "fred_series": "FEDFUNDS", "fred_label": "Fed Funds Rate"},
+    "Gold (Comex)": {"ticker": "GC=F", "opt_ticker": "GLD", "news_query": "Gold Price", "fred_series": "DGS10", "fred_label": "10Y Yield"},
+    "EUR/USD": {"ticker": "EURUSD=X", "opt_ticker": "FXE", "news_query": "EURUSD", "fred_series": "DEXUSEU", "fred_label": "Exch Rate"},
+    "NVIDIA": {"ticker": "NVDA", "opt_ticker": "NVDA", "news_query": "Nvidia Stock", "fred_series": "DGS10", "fred_label": "Yields"}
 }
 
-# --- API HELPERS ---
+DXY_TICKER = "DX-Y.NYB"
+
+# --- HELPER FUNCTIONS ---
+
 def get_api_key(key_name):
     if "api_keys" in st.secrets and key_name in st.secrets["api_keys"]:
         return st.secrets["api_keys"][key_name]
+    if key_name in st.secrets:
+        return st.secrets[key_name]
     return None
 
-# --- QUANTITATIVE ENGINE (THE NEW CONCEPTS) ---
+# [PRESERVED] Daily Data
+@st.cache_data(ttl=60)
+def get_daily_data(ticker):
+    try:
+        data = yf.download(ticker, period="2y", interval="1d", progress=False)
+        return data
+    except Exception:
+        return pd.DataFrame()
 
-@st.cache_data(ttl=3600)
-def get_macro_regime(api_key):
-    """
-    CONCEPT 2: Macro Regimes
-    Compares Fed Funds Rate vs CPI to determine Real Rates.
-    Regime = Bullish (Real Rates < 0) or Bearish (Real Rates > 0).
-    """
+# [PRESERVED] Intraday Data
+@st.cache_data(ttl=60)
+def get_intraday_data(ticker):
+    try:
+        data = yf.download(ticker, period="5d", interval="15m", progress=False)
+        return data
+    except Exception:
+        return pd.DataFrame()
+
+# [PRESERVED] News
+@st.cache_data(ttl=300)
+def get_news(api_key, query):
+    if not api_key: return None
+    try:
+        newsapi = NewsApiClient(api_key=api_key)
+        start_date = (datetime.now() - timedelta(days=28)).strftime('%Y-%m-%d')
+        articles = newsapi.get_everything(q=query, from_param=start_date, language='en', sort_by='relevancy', page_size=10)
+        return articles['articles']
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+# [NEW] Enhanced Macro Regime (Real Rates)
+@st.cache_data(ttl=86400)
+def get_macro_regime_data(api_key):
+    """Fetches Fed Funds and CPI to calculate Real Rates Regime"""
     if not api_key: return None
     try:
         fred = Fred(api_key=api_key)
-        # Fetch Fed Funds (Interest Rates) and CPI (Inflation)
+        # 1. Fed Funds Rate (Cost of Money)
         ffr = fred.get_series('FEDFUNDS').iloc[-1]
-        cpi = fred.get_series('CPIAUCSL').pct_change(12).iloc[-1] * 100 # YoY Inflation
+        # 2. CPI YoY (Inflation)
+        cpi_series = fred.get_series('CPIAUCSL').pct_change(12) * 100
+        cpi = cpi_series.iloc[-1]
         
         real_rate = ffr - cpi
+        bias = "BULLISH" if real_rate < 0.5 else "BEARISH" # Simple threshold logic
         
-        regime = {
-            "rate": ffr,
-            "cpi": cpi,
-            "real_rate": real_rate,
-            "status": "LIQUIDITY EXPANSION" if real_rate < 0 else "LIQUIDITY CONTRACTION",
-            "bias": "BULLISH" if real_rate < 0.5 else "BEARISH" # Threshold tuning
-        }
-        return regime
-    except:
+        return {"ffr": ffr, "cpi": cpi, "real_rate": real_rate, "bias": bias}
+    except Exception:
         return None
 
+# [NEW] GARCH-Style Volatility Forecast
 @st.cache_data(ttl=300)
-def calculate_volatility_forecast(ticker):
-    """
-    CONCEPT 3: GARCH-style Volatility Forecasting on True Range.
-    Returns: Forecasted Range %, Signal (Trade/No Trade).
-    """
+def calculate_volatility_permission(ticker):
+    """Calculates Log-TR GARCH Forecast for Trade Permission"""
     try:
         df = yf.download(ticker, period="1y", interval="1d", progress=False)
         if df.empty: return None
-
-        # 1. Calculate True Range (TR)
-        # Handling MultiIndex if present
+        
+        # Handle MultiIndex
         if isinstance(df.columns, pd.MultiIndex):
-            high = df['High'].iloc[:, 0]
-            low = df['Low'].iloc[:, 0]
-            close = df['Close'].iloc[:, 0]
+            high, low, close = df['High'].iloc[:, 0], df['Low'].iloc[:, 0], df['Close'].iloc[:, 0]
         else:
             high, low, close = df['High'], df['Low'], df['Close']
             
+        # Calculate True Range %
         prev_close = close.shift(1)
-        tr1 = high - low
-        tr2 = (high - prev_close).abs()
-        tr3 = (low - prev_close).abs()
-        
-        # Combine into DataFrame to take max
-        tr_df = pd.concat([tr1, tr2, tr3], axis=1)
-        true_range = tr_df.max(axis=1)
-        
-        # Normalize TR as % of price
-        tr_pct = (true_range / close) * 100
+        tr = pd.concat([high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
+        tr_pct = (tr / close) * 100
         tr_pct = tr_pct.dropna()
         
-        # 2. Log Transform (Stabilize variance)
+        # Log Transform & EWMA (GARCH Proxy)
         log_tr = np.log(tr_pct)
+        forecast_log = log_tr.ewm(alpha=0.94).mean().iloc[-1]
+        forecast_tr = np.exp(forecast_log)
         
-        # 3. Simple GARCH Proxy (EWMA of Volatility)
-        # We use a recursive smoothing to simulate volatility persistence
-        # Forecast_t = lambda * Actual_{t-1} + (1-lambda) * Forecast_{t-1}
-        ewma_vol = log_tr.ewm(alpha=0.94).mean() # Alpha similar to RiskMetrics decay
-        
-        # Forecast for "Tomorrow" (Last value of the EWMA)
-        forecast_log = ewma_vol.iloc[-1]
-        forecast_tr_pct = np.exp(forecast_log)
-        
-        # 4. Generate Signal
-        # Baseline: 20-day moving average of realized TR
-        baseline_vol = tr_pct.rolling(20).mean().iloc[-1]
-        
-        signal = 1 if forecast_tr_pct > baseline_vol else 0
+        # Baseline (20d MA)
+        baseline = tr_pct.rolling(20).mean().iloc[-1]
         
         return {
-            "forecast_pct": forecast_tr_pct,
-            "baseline_pct": baseline_vol,
-            "signal": signal,
-            "tr_history": tr_pct
+            "forecast": forecast_tr,
+            "baseline": baseline,
+            "signal": "TRADE PERMITTED" if forecast_tr > baseline else "NO TRADE / CAUTION",
+            "is_go": forecast_tr > baseline
         }
-    except Exception as e:
-        st.error(f"Vol Error: {e}")
-        return None
+    except: return None
 
+# [NEW] Options Probability (Breeden-Litzenberger)
 @st.cache_data(ttl=3600)
-def get_options_probability(ticker_symbol):
-    """
-    CONCEPT 1: Options Implied Probabilities (Breeden-Litzenberger).
-    Extracts PDF from Option Chain.
-    """
+def get_options_pdf(opt_ticker):
+    """Extracts Probability Density Function from Option Chain"""
     try:
-        tk = yf.Ticker(ticker_symbol)
-        
-        # Get nearest monthly expiration (usually 3rd or 4th in list to avoid 0DTE noise)
+        tk = yf.Ticker(opt_ticker)
         exps = tk.options
         if len(exps) < 2: return None
-        target_exp = exps[1] # Look ~1-2 weeks out for better curve
+        target_exp = exps[1] # Skip 0DTE, look at next expiry
         
-        # Get Chain
         chain = tk.option_chain(target_exp)
         calls = chain.calls
         
-        # Filter for liquidity
+        # Filter and Midpoint
         calls = calls[(calls['volume'] > 10) & (calls['openInterest'] > 50)]
-        
         if calls.empty: return None
-        
-        # Prepare Data for Calculus
-        # Using Midpoint price for better accuracy
         calls['mid'] = (calls['bid'] + calls['ask']) / 2
-        # Fallback to lastPrice if bid/ask is missing/wide
-        calls['price'] = np.where((calls['bid']==0) | (calls['ask']==0), calls['lastPrice'], calls['mid'])
+        calls['price'] = np.where((calls['bid']==0), calls['lastPrice'], calls['mid'])
         
         df = calls[['strike', 'price']].sort_values('strike')
         
-        # 1. Fit Smooth Curve (Spline) to Call Prices vs Strike
-        # S parameter controls smoothing (critical for 2nd derivative stability)
-        spline = UnivariateSpline(df['strike'], df['price'], k=4, s=len(df)*2) 
-        
+        # Spline Fit & 2nd Derivative
+        spline = UnivariateSpline(df['strike'], df['price'], k=4, s=len(df)*2)
         strikes_smooth = np.linspace(df['strike'].min(), df['strike'].max(), 200)
-        prices_smooth = spline(strikes_smooth)
         
-        # 2. Calculate Second Derivative (PDF)
-        # Breeden-Litzenberger: PDF ~ d^2C / dK^2
-        deriv1 = spline.derivative(n=1)
-        deriv2 = spline.derivative(n=2)
+        # PDF = 2nd Derivative of Price w.r.t Strike
+        pdf = spline.derivative(n=2)(strikes_smooth)
+        pdf = np.maximum(pdf, 0) # Remove negatives
         
-        pdf = deriv2(strikes_smooth)
+        # Find Peak
+        peak_price = strikes_smooth[np.argmax(pdf)]
         
-        # Normalize PDF so area under curve ~ 1 (visualization only)
-        pdf = np.maximum(pdf, 0) # Remove negative artifacts
-        pdf = pdf / pdf.sum()
-        
-        return {
-            "strikes": strikes_smooth,
-            "pdf": pdf,
-            "date": target_exp,
-            "raw_strikes": df['strike'],
-            "raw_prices": df['price']
-        }
-        
-    except Exception as e:
-        return None
+        return {"strikes": strikes_smooth, "pdf": pdf, "peak": peak_price, "date": target_exp}
+    except: return None
+
+# [PRESERVED] Intraday Calcs
+def calculate_vwap(df):
+    if df.empty: return df
+    df['TP'] = (df['High'] + df['Low'] + df['Close']) / 3
+    df['TPV'] = df['TP'] * df['Volume']
+    df['VWAP'] = df['TPV'].cumsum() / df['Volume'].cumsum()
+    return df
+
+def calculate_rsi(series, period=14):
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
+
+# [PRESERVED] Monte Carlo & Correlation
+@st.cache_data(ttl=3600)
+def get_correlation_data():
+    tickers = {v['ticker']: k for k, v in ASSETS.items()}
+    tickers[DXY_TICKER] = "US Dollar Index (DXY)"
+    try:
+        data = yf.download(list(tickers.keys()), period="1y", interval="1d", progress=False)['Close']
+        data = data.rename(columns=tickers)
+        return data
+    except: return pd.DataFrame()
+
+@st.cache_data(ttl=3600)
+def generate_monte_carlo(stock_data, days=126, simulations=1000):
+    if isinstance(stock_data.columns, pd.MultiIndex): close = stock_data['Close'].iloc[:, 0]
+    else: close = stock_data['Close']
+    log_returns = np.log(1 + close.pct_change())
+    u, var = log_returns.mean(), log_returns.var()
+    drift = u - (0.5 * var)
+    stdev = log_returns.std()
+    price_paths = np.zeros((days + 1, simulations))
+    price_paths[0] = close.iloc[-1]
+    daily_returns = np.exp(drift + stdev * np.random.normal(0, 1, (days, simulations)))
+    for t in range(1, days + 1): price_paths[t] = price_paths[t - 1] * daily_returns[t - 1]
+    return pd.date_range(start=close.index[-1], periods=days + 1, freq='B'), price_paths
+
+# [PRESERVED] AI Sentiment
+@st.cache_data(ttl=900)
+def get_ai_sentiment(api_key, asset_name, news_items):
+    if not api_key or not news_items or isinstance(news_items, str): return None
+    try:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel('gemini-pro')
+        headlines = [f"- {item['title']}" for item in news_items[:8]]
+        prompt = f"Analyze these headlines for {asset_name}. concise sentiment summary (Bullish/Bearish/Neutral) max 40 words:\n" + "\n".join(headlines)
+        response = model.generate_content(prompt)
+        return response.text
+    except: return None
 
 # --- SIDEBAR ---
 with st.sidebar:
-    st.header("⚙️ Quantitative Specs")
-    selected_asset_name = st.selectbox("Select Asset", list(ASSETS.keys()))
-    asset_info = ASSETS[selected_asset_name]
-    
+    st.header("⚙️ Settings")
+    selected_asset = st.selectbox("Select Asset", list(ASSETS.keys()))
+    asset_info = ASSETS[selected_asset]
     st.markdown("---")
-    st.caption("API Configuration")
-    fred_key = get_api_key("fred_api_key")
     news_key = get_api_key("news_api_key")
-    
-    st.success(f"Macro Data: {'Connected' if fred_key else 'Missing Key'}")
-    
-    if st.button("Refresh Models"):
-        st.cache_data.clear()
+    fred_key = get_api_key("fred_api_key")
+    google_key = get_api_key("google_api_key")
+    st.caption(f"Keys: News {'✅' if news_key else '❌'} | FRED {'✅' if fred_key else '❌'}")
+    if st.button("Refresh Data"): st.cache_data.clear()
 
 # --- MAIN DASHBOARD ---
-st.title(f"🧠 {selected_asset_name} Quantitative Terminal")
+st.title(f"📊 {selected_asset} Pro Terminal")
 
-# 1. MACRO REGIME SECTION
-macro_data = get_macro_regime(fred_key)
+# Fetch Data
+daily_data = get_daily_data(asset_info['ticker'])
+intraday_data = get_intraday_data(asset_info['ticker'])
+macro_regime = get_macro_regime_data(fred_key) # New
+vol_forecast = calculate_volatility_permission(asset_info['ticker']) # New
+options_pdf = get_options_pdf(asset_info['opt_ticker']) # New
 
-if macro_data:
-    st.markdown("### 1. Macro-Economic Regime (Context Filter)")
+# --- 1. OVERVIEW & MACRO REGIME (New & Preserved Merged) ---
+if not daily_data.empty:
+    if isinstance(daily_data.columns, pd.MultiIndex): close, high, low, open_p = daily_data['Close'].iloc[:, 0], daily_data['High'].iloc[:, 0], daily_data['Low'].iloc[:, 0], daily_data['Open'].iloc[:, 0]
+    else: close, high, low, open_p = daily_data['Close'], daily_data['High'], daily_data['Low'], daily_data['Open']
+
+    curr = close.iloc[-1]
+    pct = ((curr - close.iloc[-2]) / close.iloc[-2]) * 100
     
-    # Dynamic CSS class based on regime
-    regime_cls = "regime-bull" if macro_data['bias'] == "BULLISH" else "regime-bear"
+    # Header Metrics
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Price", f"{curr:,.2f}", f"{pct:.2f}%")
+    c2.metric("High", f"{high.max():,.2f}")
+    c3.metric("Low", f"{low.min():,.2f}")
     
-    st.markdown(f"""
-    <div class='regime-box {regime_cls}'>
-        <div style="display:flex; justify-content: space-between; align-items:center;">
-            <div>
-                <h3 style="margin:0;">Regime: {macro_data['status']}</h3>
-                <p style="margin:0; opacity:0.8;">Primary Bias: <strong>{macro_data['bias']}</strong></p>
-            </div>
-            <div style="text-align:right;">
-                <h2 style="margin:0;">{macro_data['real_rate']:.2f}%</h2>
-                <small>Real Rate (Fed Funds - CPI)</small>
-            </div>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Fed Funds Rate (Cost of Money)", f"{macro_data['rate']:.2f}%")
-    m2.metric("CPI YoY (Inflation)", f"{macro_data['cpi']:.2f}%")
-    m3.metric("Regime Implication", "Seek Long Exposure" if macro_data['bias']=="BULLISH" else "Cash / Short Bias")
-
-else:
-    st.warning("Please add FRED API Key to secrets.toml to unlock Macro Regime.")
-
-st.markdown("---")
-
-# 2. VOLATILITY & PERMISSION
-st.markdown("### 2. Volatility Forecast (Permission to Trade)")
-vol_data = calculate_volatility_forecast(asset_info['ticker'])
-
-if vol_data:
-    c1, c2 = st.columns([1, 2])
-    
-    with c1:
-        signal_text = "TRADE PERMITTED" if vol_data['signal'] == 1 else "NO TRADE / CAUTION"
-        badge_cls = "vol-badge-go" if vol_data['signal'] == 1 else "vol-badge-stop"
-        
-        st.markdown(f"""
-        <div style="padding: 20px; border: 1px solid #333; border-radius: 10px; text-align: center;">
-            <h4>Tomorrow's Bias</h4>
-            <span class='{badge_cls}' style="font-size: 1.2em;">{signal_text}</span>
-            <hr style="border-color: #444;">
-            <p>Projected Range: <strong>{vol_data['forecast_pct']:.2f}%</strong></p>
-            <p style="font-size: 0.8em; opacity: 0.7;">Baseline (20d): {vol_data['baseline_pct']:.2f}%</p>
+    # [NEW CONCEPT] Macro Regime Display
+    if macro_regime:
+        bias_color = "bullish" if macro_regime['bias'] == "BULLISH" else "bearish"
+        c4.markdown(f"""
+        <div style="text-align:center; padding:5px;">
+            <div style="font-size:0.8em; color:gray;">Macro Regime (Real Rates)</div>
+            <span class='{bias_color}'>{macro_regime['bias']}</span>
+            <div style="font-size:0.8em;">{macro_regime['real_rate']:.2f}%</div>
         </div>
         """, unsafe_allow_html=True)
-        
-        st.info("**Concept:** Using GARCH-style logic on Log-True Range. High forecasted volatility (relative to history) favors breakout/momentum strategies. Low volatility suggests chop.")
-        
-    with c2:
-        # Plot TR History vs Forecast
-        hist = vol_data['tr_history'].tail(50)
-        fig_vol = go.Figure()
-        fig_vol.add_trace(go.Bar(x=hist.index, y=hist.values, name="Realized True Range %", marker_color='#333'))
-        
-        # Add a line for the forecast
-        fig_vol.add_hline(y=vol_data['baseline_pct'], line_dash="dash", line_color="gray", annotation_text="Baseline")
-        fig_vol.add_hrect(y0=0, y1=vol_data['baseline_pct'], fillcolor="red", opacity=0.1, layer="below", line_width=0)
-        fig_vol.add_hrect(y0=vol_data['baseline_pct'], y1=hist.max(), fillcolor="green", opacity=0.1, layer="below", line_width=0)
-        
-        fig_vol.update_layout(
-            title="True Range Regimes (Green Zone = Actionable Volatility)",
-            template="plotly_dark", 
-            height=300, 
-            margin=dict(l=20, r=20, t=40, b=20),
-            paper_bgcolor='rgba(0,0,0,0)',
-            plot_bgcolor='rgba(0,0,0,0)'
-        )
-        st.plotly_chart(fig_vol, use_container_width=True)
+    else:
+        c4.metric("Vol", f"{(close.pct_change().std()* (252**0.5)*100):.2f}%")
 
+    # [PRESERVED] Main Chart
+    fig = go.Figure()
+    fig.add_trace(go.Candlestick(x=daily_data.index, open=open_p, high=high, low=low, close=close, name="Price"))
+    fig.update_layout(height=400, template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', xaxis_rangeslider_visible=False)
+    st.plotly_chart(fig, use_container_width=True)
+
+# --- 2. VOLATILITY & INTRADAY (New Logic Inserted) ---
 st.markdown("---")
+st.subheader("⚡ Intraday & Volatility Permissions")
 
-# 3. INSTITUTIONAL EXPECTATIONS (OPTIONS)
-st.markdown("### 3. Institutional Expectations (Market Implied Probabilities)")
-
-opt_data = get_options_probability(asset_info['opt_ticker'])
-
-if opt_data:
-    st.markdown(f"**Target Expiration:** {opt_data['date']}")
+if not intraday_data.empty:
+    # [NEW CONCEPT] Volatility Permission Logic
+    if vol_forecast:
+        v1, v2 = st.columns([1, 3])
+        with v1:
+            st.markdown("**Daily Volatility Filter**")
+            badge_class = "vol-go" if vol_forecast['is_go'] else "vol-stop"
+            st.markdown(f"<span class='{badge_class}'>{vol_forecast['signal']}</span>", unsafe_allow_html=True)
+            st.caption(f"Forecast Range: {vol_forecast['forecast']:.2f}% vs Baseline: {vol_forecast['baseline']:.2f}%")
+        with v2:
+            st.info("Log-GARCH model predicts if today's range warrants trading. Green = Expansion likely.")
+            
+    # [PRESERVED] Intraday Dashboard
+    if isinstance(intraday_data.columns, pd.MultiIndex): i_close = intraday_data['Close'].iloc[:, 0]; i_vol = intraday_data['Volume'].iloc[:, 0]
+    else: i_close = intraday_data['Close']; i_vol = intraday_data['Volume']
     
-    # Identify Peak Probability Price
-    peak_idx = np.argmax(opt_data['pdf'])
-    most_likely_price = opt_data['strikes'][peak_idx]
+    df_vwap = calculate_vwap(pd.DataFrame({'High': intraday_data['High'].iloc[:,0] if isinstance(intraday_data.columns, pd.MultiIndex) else intraday_data['High'], 
+                                         'Low': intraday_data['Low'].iloc[:,0] if isinstance(intraday_data.columns, pd.MultiIndex) else intraday_data['Low'], 
+                                         'Close': i_close, 'Volume': i_vol}))
+    current_vwap = df_vwap['VWAP'].iloc[-1]
+    rsi_val = calculate_rsi(i_close).iloc[-1]
     
-    # Get Current Price for comparison
-    curr_df = yf.Ticker(asset_info['opt_ticker']).history(period='1d')
-    curr_price = curr_df['Close'].iloc[-1] if not curr_df.empty else 0
-    
-    c_opt1, c_opt2 = st.columns([3, 1])
-    
-    with c_opt1:
-        fig_pdf = go.Figure()
-        
-        # Plot the PDF Curve
-        fig_pdf.add_trace(go.Scatter(
-            x=opt_data['strikes'], 
-            y=opt_data['pdf'], 
-            mode='lines', 
-            name='Implied Probability Density',
-            fill='tozeroy',
-            line=dict(color='#00d4ff', width=3)
-        ))
-        
-        # Add Current Price Line
-        fig_pdf.add_vline(x=curr_price, line_dash="dot", line_color="white", annotation_text=f"Current: {curr_price:.2f}")
-        
-        # Add Market Expected Price Line
-        fig_pdf.add_vline(x=most_likely_price, line_dash="dash", line_color="#d4af37", annotation_text=f"Market Expectation: {most_likely_price:.0f}")
+    col_dash1, col_dash2, col_dash3 = st.columns(3)
+    with col_dash1:
+        bias = "BULLISH" if i_close.iloc[-1] > current_vwap else "BEARISH"
+        st.metric("VWAP Bias", bias, f"RSI: {rsi_val:.1f}")
+    with col_dash2:
+        st.metric("Volume Trend", "Rising" if i_vol.tail(3).mean() > i_vol.mean() else "Falling")
+    with col_dash3:
+        st.metric("Gap %", f"{((open_p.iloc[-1] - close.iloc[-2])/close.iloc[-2]*100):.2f}%")
 
-        fig_pdf.update_layout(
-            title=f"Options-Implied Probability Distribution (Breeden-Litzenberger)",
-            xaxis_title="Price Level",
-            yaxis_title="Probability Density",
-            template="plotly_dark",
-            height=400,
-            hovermode="x"
-        )
-        st.plotly_chart(fig_pdf, use_container_width=True)
-        
-    with c_opt2:
-        st.info("""
-        **How to read this:**
-        This curve is derived from the **2nd Derivative of Call Option Prices**.
-        
-        It shows where Institutions (who hedge with options) are betting the price will land.
-        
-        * **Tall/Narrow Peak:** High confidence, low expected volatility.
-        * **Wide/Flat:** High uncertainty, high expected volatility.
-        * **Skewed:** Tail risk protection (if skewed left, hedging against crash).
-        """)
-        
-        skew = "Neutral"
-        if most_likely_price > curr_price * 1.01: skew = "Bullish Skew"
-        elif most_likely_price < curr_price * 0.99: skew = "Bearish Skew"
-        
-        st.metric("Market Gravity Center", f"${most_likely_price:.2f}", skew)
-
+# --- 3. [NEW CONCEPT] OPTIONS HEATMAP (Institutional View) ---
+st.markdown("---")
+st.subheader("🏦 Institutional Expectations (Options Market)")
+if options_pdf:
+    op_col1, op_col2 = st.columns([3, 1])
+    with op_col1:
+        fig_opt = go.Figure()
+        fig_opt.add_trace(go.Scatter(x=options_pdf['strikes'], y=options_pdf['pdf'], fill='tozeroy', name='Implied Prob', line=dict(color='#00d4ff')))
+        fig_opt.add_vline(x=curr, line_dash="dot", annotation_text="Spot Price")
+        fig_opt.add_vline(x=options_pdf['peak'], line_dash="dash", line_color="#d4af37", annotation_text="Mkt Expectation")
+        fig_opt.update_layout(template="plotly_dark", height=350, title=f"Probability Distribution (Exp: {options_pdf['date']})", paper_bgcolor='rgba(0,0,0,0)')
+        st.plotly_chart(fig_opt, use_container_width=True)
+    with op_col2:
+        st.markdown(f"**Market Center:** `${options_pdf['peak']:.2f}`")
+        skew = "Bullish" if options_pdf['peak'] > curr else "Bearish"
+        st.markdown(f"**Skew:** `{skew}`")
+        st.caption("Calculated via Breeden-Litzenberger (2nd derivative of call prices).")
 else:
-    st.warning("Could not build Options Probability Surface (Data Unavailable or Market Closed).")
-    st.caption("Try selecting SPY or QQQ for best options data liquidity.")
+    st.warning("Options data unavailable for this asset (or market closed).")
 
-# 4. TRADITIONAL METRICS (Simplified)
-with st.expander("Show Traditional Metrics (News & AI)"):
+# --- 4. [PRESERVED] PREDICTION (Monte Carlo) ---
+st.markdown("---")
+st.subheader("🔮 6-Month Projection (Monte Carlo)")
+if not daily_data.empty:
+    pred_dates, pred_paths = generate_monte_carlo(daily_data)
+    fig_pred = go.Figure()
+    hist_slice = close.tail(90)
+    fig_pred.add_trace(go.Scatter(x=hist_slice.index, y=hist_slice.values, name='History', line=dict(color='white')))
+    fig_pred.add_trace(go.Scatter(x=pred_dates, y=np.mean(pred_paths, axis=1), name='Avg Path', line=dict(color='#00ff00', dash='dash')))
+    # Add light potential paths
+    for i in range(50): fig_pred.add_trace(go.Scatter(x=pred_dates, y=pred_paths[:, i], mode='lines', line=dict(color='cyan', width=1), opacity=0.05, showlegend=False))
+    fig_pred.update_layout(height=400, template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
+    st.plotly_chart(fig_pred, use_container_width=True)
+
+# --- 5. [PRESERVED] CORRELATIONS & SENTIMENT ---
+st.markdown("---")
+st.subheader("🌐 Global Context & News")
+corr_data = get_correlation_data()
+c1, c2 = st.columns(2)
+with c1:
+    if not corr_data.empty:
+        fig_heat = px.imshow(corr_data.corr(), text_auto=True, color_continuous_scale='RdBu_r', aspect="auto")
+        fig_heat.update_layout(template="plotly_dark", height=350, paper_bgcolor='rgba(0,0,0,0)')
+        st.plotly_chart(fig_heat, use_container_width=True)
+with c2:
     if news_key:
-        news = NewsApiClient(api_key=news_key).get_everything(q=asset_info['news_query'], language='en', page_size=3)
-        if news['articles']:
-            st.write(f"**Latest News for {asset_info['news_query']}**")
-            for art in news['articles']:
-                st.markdown(f"- [{art['title']}]({art['url']})")
+        news_data = get_news(news_key, asset_info['news_query'])
+        if google_key and isinstance(news_data, list):
+            s = get_ai_sentiment(google_key, selected_asset, news_data)
+            if s: st.markdown(f"<div class='sentiment-box'><strong>🤖 AI Sentiment:</strong> {s}</div>", unsafe_allow_html=True)
+        if isinstance(news_data, list):
+            for a in news_data[:3]: st.markdown(f"- [{a['title']}]({a['url']})")
