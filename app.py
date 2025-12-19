@@ -3,7 +3,6 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 import requests
 from newsapi import NewsApiClient
 from datetime import datetime, timedelta
@@ -11,17 +10,8 @@ from scipy.stats import norm
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.mixture import GaussianMixture
 
-# --- SAFE IMPORT FOR NLTK ---
-# This prevents the app from crashing if NLTK is not installed
-try:
-    import nltk
-    from nltk.sentiment.vader import SentimentIntensityAnalyzer
-    NLTK_AVAILABLE = True
-except ImportError:
-    NLTK_AVAILABLE = False
-
 # --- APP CONFIGURATION ---
-st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V4 (Inst. Grade)", page_icon="💹")
+st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V3.1", page_icon="💹")
 
 # --- BLOOMBERG TERMINAL STYLING (CSS) ---
 st.markdown("""
@@ -29,59 +19,70 @@ st.markdown("""
     /* Main Background - True Black */
     .stApp { background-color: #000000; font-family: 'Courier New', Courier, monospace; }
     
-    /* Sidebar */
+    /* Sidebar Background */
     section[data-testid="stSidebar"] { background-color: #111111; border-right: 1px solid #333; }
     
-    /* Typography */
+    /* Text Colors */
     h1, h2, h3, h4 { color: #ff9900 !important; font-family: 'Arial', sans-serif; text-transform: uppercase; letter-spacing: 1px; }
     p, div, span { color: #e0e0e0; }
     
-    /* Metrics */
-    div[data-testid="stMetricValue"] { color: #00e6ff !important; font-family: 'Courier New', monospace; font-weight: bold; }
+    /* Metric Styling */
+    div[data-testid="stMetricValue"] { 
+        color: #00e6ff !important; 
+        font-family: 'Courier New', monospace;
+        font-weight: bold;
+    }
     div[data-testid="stMetricLabel"] { color: #ff9900 !important; font-size: 0.8rem; }
     
-    /* Components */
+    /* Tables/Dataframes */
     .stDataFrame { border: 1px solid #333; }
-    .terminal-box { border: 1px solid #333; background-color: #0a0a0a; padding: 15px; margin-bottom: 10px; }
     
-    /* Badges */
-    .bullish { color: #000; background-color: #00ff00; padding: 2px 6px; font-weight: bold; }
-    .bearish { color: #000; background-color: #ff3333; padding: 2px 6px; font-weight: bold; }
-    .neutral { color: #000; background-color: #cccccc; padding: 2px 6px; font-weight: bold; }
-    .whale-alert { color: #fff; background-color: #9900ff; padding: 2px 6px; font-weight: bold; border: 1px solid #fff; }
+    /* Custom Boxes */
+    .terminal-box { 
+        border: 1px solid #333; 
+        background-color: #0a0a0a; 
+        padding: 15px; 
+        margin-bottom: 10px;
+    }
     
+    /* Signal badges */
+    .bullish { color: #000000; background-color: #00ff00; padding: 2px 6px; font-weight: bold; }
+    .bearish { color: #000000; background-color: #ff3333; padding: 2px 6px; font-weight: bold; }
+    .neutral { color: #000000; background-color: #cccccc; padding: 2px 6px; font-weight: bold; }
+    
+    /* News Link */
+    .news-link { color: #00e6ff; text-decoration: none; font-size: 0.9em; }
+    .news-link:hover { text-decoration: underline; color: #ff9900; }
+
+    /* Volatility Badges */
+    .vol-go { border: 1px solid #00ff00; color: #00ff00; padding: 2px 8px; font-weight: bold; letter-spacing: 1px; }
+    .vol-stop { border: 1px solid #ff3333; color: #ff3333; padding: 2px 8px; font-weight: bold; letter-spacing: 1px; }
+
     /* UI Elements */
-    button { border-radius: 0px !important; border: 1px solid #ff9900 !important; color: #ff9900 !important; background: black !important; }
     .stSelectbox > div > div { border-radius: 0px; background-color: #111; color: white; border: 1px solid #444; }
+    button { border-radius: 0px !important; border: 1px solid #ff9900 !important; color: #ff9900 !important; background: black !important; }
+    hr { margin: 1em 0; border: 0; border-top: 1px solid #333; }
 </style>
 """, unsafe_allow_html=True)
 
-# --- CONSTANTS ---
+# --- CONSTANTS & MAPPINGS ---
 ASSETS = {
+    "Gold (Comex)": {"ticker": "GC=F", "opt_ticker": "GLD"},
     "S&P 500": {"ticker": "^GSPC", "opt_ticker": "SPY"},
     "NASDAQ": {"ticker": "^IXIC", "opt_ticker": "QQQ"},
-    "Gold": {"ticker": "GC=F", "opt_ticker": "GLD"},
+    "EUR/USD": {"ticker": "EURUSD=X", "opt_ticker": None}, 
     "NVIDIA": {"ticker": "NVDA", "opt_ticker": "NVDA"},
-    "Bitcoin": {"ticker": "BTC-USD", "opt_ticker": None},
-    "EUR/USD": {"ticker": "EURUSD=X", "opt_ticker": None}
+    "Bitcoin": {"ticker": "BTC-USD", "opt_ticker": None}
 }
-
-# --- NLTK SETUP (Resilient) ---
-@st.cache_resource
-def download_nltk_data():
-    if NLTK_AVAILABLE:
-        try:
-            nltk.download('vader_lexicon', quiet=True)
-        except: pass
-
-download_nltk_data()
 
 # --- HELPER FUNCTIONS ---
 
 def get_api_key(key_name):
     if "api_keys" in st.secrets and key_name in st.secrets["api_keys"]:
         return st.secrets["api_keys"][key_name]
-    return st.secrets.get(key_name, None)
+    if key_name in st.secrets:
+        return st.secrets[key_name]
+    return None
 
 def flatten_dataframe(df):
     if df.empty: return df
@@ -91,344 +92,596 @@ def flatten_dataframe(df):
     df = df.loc[:, ~df.columns.duplicated()]
     return df
 
-# --- 1. CORE ENGINES (ML, REGIME, ETC) ---
+# --- 1. QUANT ENGINE (GMM + HURST) ---
+def calculate_hurst(series, lags=range(2, 20)):
+    try:
+        tau = [np.sqrt(np.std(np.subtract(series[lag:], series[:-lag]))) for lag in lags]
+        poly = np.polyfit(np.log(lags), np.log(tau), 1)
+        return poly[0] * 2.0
+    except: return 0.5
 
+@st.cache_data(ttl=3600)
+def get_market_regime(ticker):
+    try:
+        df = yf.download(ticker, period="5y", interval="1d", progress=False)
+        df = flatten_dataframe(df)
+        if df.empty: return None
+        
+        data = df.copy()
+        data['Returns'] = data['Close'].pct_change()
+        data['Volatility'] = data['Returns'].rolling(20).std()
+        data = data.dropna()
+        
+        X = data[['Returns', 'Volatility']].values
+        gmm = GaussianMixture(n_components=3, covariance_type="full", random_state=42)
+        gmm.fit(X)
+        
+        current_state = gmm.predict(X[[-1]])[0]
+        probs = gmm.predict_proba(X[[-1]])[0]
+        means = gmm.means_
+        state_order = np.argsort(means[:, 1]) 
+        
+        regime_map = {
+            state_order[0]: "LOW VOL (Trend)", 
+            state_order[1]: "NEUTRAL (Chop)", 
+            state_order[2]: "HIGH VOL (Crisis)"
+        }
+        regime_desc = regime_map.get(current_state, "Unknown")
+        
+        if "LOW VOL" in regime_desc: color = "bullish"
+        elif "HIGH VOL" in regime_desc: color = "bearish"
+        else: color = "neutral"
+        
+        return {"regime": regime_desc, "color": color, "confidence": max(probs)}
+    except: return None
+
+# --- 2. MACHINE LEARNING ENGINE ---
 @st.cache_data(ttl=3600)
 def get_ml_prediction(ticker):
     try:
         df = yf.download(ticker, period="2y", interval="1d", progress=False)
-        df = flatten_dataframe(df)
+        df = flatten_dataframe(df) 
         if df.empty: return None, 0.5
         
         data = df.copy()
         data['Returns'] = data['Close'].pct_change()
         data['Target'] = (data['Close'].shift(-1) > data['Close']).astype(int)
+        
         data['Vol_5d'] = data['Returns'].rolling(5).std()
         data['Mom_5d'] = data['Close'].pct_change(5)
-        data = data.dropna()
         
+        data = data.dropna()
         if len(data) < 50: return None, 0.5
         
+        features = ['Vol_5d', 'Mom_5d']
+        X = data[features]
+        y = data['Target']
+        
         model = RandomForestClassifier(n_estimators=100, max_depth=3, random_state=42)
-        model.fit(data[['Vol_5d', 'Mom_5d']], data['Target'])
-        prob_up = model.predict_proba(data[['Vol_5d', 'Mom_5d']].iloc[[-1]])[0][1]
+        model.fit(X, y)
+        
+        last_row = X.iloc[[-1]]
+        prob_up = model.predict_proba(last_row)[0][1]
         return model, prob_up
     except: return None, 0.5
 
-@st.cache_data(ttl=3600)
-def get_market_regime(ticker):
-    try:
-        df = yf.download(ticker, period="2y", interval="1d", progress=False)
-        df = flatten_dataframe(df)
-        if df.empty: return None
-        
-        data = df.dropna().copy()
-        data['Returns'] = data['Close'].pct_change()
-        data['Vol'] = data['Returns'].rolling(20).std()
-        data = data.dropna()
-        
-        X = data[['Returns', 'Vol']].values
-        gmm = GaussianMixture(n_components=3, random_state=42).fit(X)
-        state = gmm.predict(X[[-1]])[0]
-        
-        # Sort states by volatility to label them correctly
-        means = gmm.means_
-        sorted_idx = np.argsort(means[:, 1])
-        labels = {sorted_idx[0]: "LOW VOL (Trend)", sorted_idx[1]: "NEUTRAL (Chop)", sorted_idx[2]: "HIGH VOL (Crisis)"}
-        
-        desc = labels.get(state, "Unknown")
-        color = "bullish" if "LOW VOL" in desc else "bearish" if "HIGH VOL" in desc else "neutral"
-        return {"regime": desc, "color": color}
-    except: return None
+# --- 3. UPDATED GAMMA EXPOSURE ENGINE (FROM EXTRACTED CODE) ---
 
-# --- 2. INSTITUTIONAL GREEKS (GEX + VANNA) ---
-
-def calculate_greeks(S, K, T, r, sigma, opt_type):
-    """Calculates Gamma and Vanna"""
-    if T <= 0 or sigma <= 0: return 0, 0
-    
+def calculate_black_scholes_gamma(S, K, T, r, sigma):
+    """
+    Calculates the Gamma of an option using Black-Scholes.
+    """
+    if T <= 0 or sigma <= 0: return 0
     d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
-    d2 = d1 - sigma * np.sqrt(T)
-    
-    # Gamma
     gamma = norm.pdf(d1) / (S * sigma * np.sqrt(T))
-    
-    # Vanna
-    vanna = -norm.pdf(d1) * d2 / sigma
-    
-    return gamma, vanna
+    return gamma
 
-@st.cache_data(ttl=300)
-def get_institutional_greeks(opt_ticker):
-    if not opt_ticker: return None, None, None
+@st.cache_data(ttl=3600)
+def get_gex_profile(opt_ticker):
+    """
+    Fetches option chain, calculates Gamma per strike, and computes Net GEX.
+    Returns: DataFrame of strikes/GEX, Expiry Date, and Current Spot Price.
+    """
+    if opt_ticker is None: return None, None, None
+
     try:
         tk = yf.Ticker(opt_ticker)
         
-        # Safe history check
+        # 1. Fetch Spot Price (Underlying)
         hist = tk.history(period="1d")
         if hist.empty: return None, None, None
-        spot = hist['Close'].iloc[-1]
-        
+        spot_price = hist['Close'].iloc[-1]
+
+        # 2. Get Expiration Dates
         exps = tk.options
-        if len(exps) < 2: return None, None, None
-        target_exp = exps[1] # Avoid 0DTE
+        if not exps or len(exps) < 2: return None, None, None
         
+        # Select the next expiration (usually index 1 to avoid 0DTE noise)
+        target_exp = exps[1]
+        
+        # 3. Fetch Option Chain
         chain = tk.option_chain(target_exp)
         calls, puts = chain.calls, chain.puts
         
+        if calls.empty or puts.empty: return None, None, None
+
+        # 4. Setup Calculation Variables
+        r = 0.045  # Risk-free rate assumption (4.5%)
         exp_date = datetime.strptime(target_exp, "%Y-%m-%d")
-        T = max((exp_date - datetime.now()).days / 365.0, 0.001)
-        r = 0.045
+        days_to_exp = (exp_date - datetime.now()).days
         
-        greeks_data = []
-        strikes = set(calls['strike']).union(set(puts['strike']))
+        # Avoid division by zero for expiring options
+        if days_to_exp <= 0: T = 0.001 
+        else: T = days_to_exp / 365.0
         
+        gex_data = []
+        # Get unique strikes from both calls and puts
+        strikes = sorted(list(set(calls['strike'].tolist() + puts['strike'].tolist())))
+        
+        # 5. Iterate Strikes and Calculate Net Gamma
         for K in strikes:
-            if K < spot*0.8 or K > spot*1.2: continue # Focus on 20% OTM/ITM
+            # Filter: Only calculate for strikes within 30% of spot price (Optimization)
+            if K < spot_price * 0.7 or K > spot_price * 1.3: continue 
             
-            # Get Call/Put Data
+            # Get Call Data
             c_row = calls[calls['strike'] == K]
-            p_row = puts[puts['strike'] == K]
-            
             c_oi = c_row['openInterest'].iloc[0] if not c_row.empty else 0
+            c_iv = c_row['impliedVolatility'].iloc[0] if not c_row.empty and 'impliedVolatility' in c_row.columns else 0.2
+            
+            # Get Put Data
+            p_row = puts[puts['strike'] == K]
             p_oi = p_row['openInterest'].iloc[0] if not p_row.empty else 0
+            p_iv = p_row['impliedVolatility'].iloc[0] if not p_row.empty and 'impliedVolatility' in p_row.columns else 0.2
             
-            c_iv = c_row['impliedVolatility'].iloc[0] if not c_row.empty else 0.2
-            p_iv = p_row['impliedVolatility'].iloc[0] if not p_row.empty else 0.2
+            # Calculate Gamma
+            c_gamma = calculate_black_scholes_gamma(spot_price, K, T, r, c_iv)
+            p_gamma = calculate_black_scholes_gamma(spot_price, K, T, r, p_iv)
             
-            # Calc Greeks
-            c_gamma, c_vanna = calculate_greeks(spot, K, T, r, c_iv, 'call')
-            p_gamma, p_vanna = calculate_greeks(spot, K, T, r, p_iv, 'put')
+            # Calculate Net GEX: (Call Gamma * OI - Put Gamma * OI) * Spot * 100 (contract size)
+            net_gex = (c_gamma * c_oi - p_gamma * p_oi) * spot_price * 100
+            gex_data.append({"strike": K, "gex": net_gex})
             
-            # Net Exposure
-            net_gamma = (c_gamma * c_oi - p_gamma * p_oi) * spot * 100
-            net_vanna = (c_vanna * c_oi - p_vanna * p_oi) * 1000 
+        df = pd.DataFrame(gex_data, columns=['strike', 'gex'])
+        
+        if df.empty: return None, None, None
             
-            greeks_data.append({"strike": K, "gamma": net_gamma, "vanna": net_vanna})
-            
-        return pd.DataFrame(greeks_data), target_exp, spot
-    except: return None, None, None
+        return df, target_exp, spot_price
 
-# --- 3. VRP & DARK POOLS ---
+    except Exception as e:
+        return None, None, None
 
-def calculate_vrp(daily_df):
-    """Calculates Variance Risk Premium"""
-    if daily_df.empty: return None
+# --- 4. VOLUME PROFILE ENGINE ---
+def calculate_volume_profile(df, bins=50):
+    if df.empty: return None, None
+    price_range = df['High'].max() - df['Low'].min()
+    if price_range == 0: return None, None
+    bin_size = price_range / bins
+    df['PriceBin'] = ((df['Close'] - df['Low'].min()) // bin_size).astype(int)
+    vol_profile = df.groupby('PriceBin')['Volume'].sum().reset_index()
+    vol_profile['PriceLevel'] = df['Low'].min() + (vol_profile['PriceBin'] * bin_size)
+    poc_idx = vol_profile['Volume'].idxmax()
+    poc_price = vol_profile.loc[poc_idx, 'PriceLevel']
+    return vol_profile, poc_price
+
+# --- 5. MONTE CARLO & SEASONALITY ---
+@st.cache_data(ttl=3600)
+def get_seasonality_stats(daily_data):
     try:
-        # Realized Vol (20d)
-        df = daily_df.copy()
-        df['log_ret'] = np.log(df['Close'] / df['Close'].shift(1))
-        df['rv'] = df['log_ret'].rolling(20).std() * np.sqrt(252) * 100
-        
-        # Implied Vol Proxy (Range Volatility)
-        df['range_vol'] = (np.log(df['High'] / df['Low'])).rolling(20).mean() * np.sqrt(252) * 100 * 1.5
-        
-        curr_rv = df['rv'].iloc[-1]
-        curr_iv_proxy = df['range_vol'].iloc[-1]
-        
-        vrp = curr_iv_proxy - curr_rv
-        
-        status = "EXPENSIVE (Sell Prem)" if vrp > 5 else "CHEAP (Buy Prem)" if vrp < 0 else "FAIR VALUE"
-        color = "bearish" if vrp > 5 else "bullish" if vrp < 0 else "neutral"
-        
-        return {"rv": curr_rv, "iv_proxy": curr_iv_proxy, "vrp": vrp, "status": status, "color": color}
+        df = daily_data.copy()
+        df['Week_Num'] = df.index.to_period('W')
+        high_days = df.groupby('Week_Num')['High'].idxmax().apply(lambda x: df.loc[x].name.day_name())
+        days_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']
+        return {'day_high': high_days.value_counts().reindex(days_order, fill_value=0) / len(high_days) * 100}
     except: return None
 
-def detect_dark_pools(intraday_df):
-    """Detects 15m volume spikes > 3x average"""
-    if intraday_df.empty: return intraday_df
-    try:
-        df = intraday_df.copy()
-        df['Vol_MA'] = df['Volume'].rolling(20).mean()
-        df['Is_Whale'] = df['Volume'] > (df['Vol_MA'] * 3.0)
-        return df
-    except: return intraday_df
+@st.cache_data(ttl=3600)
+def generate_monte_carlo(stock_data, days=126, simulations=1000):
+    close = stock_data['Close']
+    log_returns = np.log(1 + close.pct_change())
+    u, var = log_returns.mean(), log_returns.var()
+    drift = u - (0.5 * var)
+    stdev = log_returns.std()
+    price_paths = np.zeros((days + 1, simulations))
+    price_paths[0] = close.iloc[-1]
+    daily_returns = np.exp(drift + stdev * np.random.normal(0, 1, (days, simulations)))
+    for t in range(1, days + 1): price_paths[t] = price_paths[t - 1] * daily_returns[t - 1]
+    return pd.date_range(start=close.index[-1], periods=days + 1, freq='B'), price_paths
 
-# --- 4. NEWS SENTIMENT ---
+# --- 6. NEWS & ECONOMICS ---
+
+def parse_eco_value(val_str):
+    if not isinstance(val_str, str) or val_str == '': return None
+    clean = val_str.replace('%', '').replace(',', '')
+    multiplier = 1.0
+    if 'K' in clean.upper(): multiplier = 1000.0; clean = clean.upper().replace('K', '')
+    elif 'M' in clean.upper(): multiplier = 1000000.0; clean = clean.upper().replace('M', '')
+    elif 'B' in clean.upper(): multiplier = 1000000000.0; clean = clean.upper().replace('B', '')
+    try: return float(clean) * multiplier
+    except: return None
+
+def analyze_eco_context(actual_str, forecast_str, previous_str):
+    is_happened = actual_str is not None and actual_str != ""
+    val_actual = parse_eco_value(actual_str)
+    val_forecast = parse_eco_value(forecast_str)
+    val_prev = parse_eco_value(previous_str)
+    
+    context_str = ""
+    bias = "Neutral"
+    
+    if is_happened:
+        if val_actual is not None and val_forecast is not None:
+            context_str = f"Actual ({actual_str}) vs Forecast ({forecast_str})"
+            delta = val_actual - val_forecast
+            if val_forecast != 0: pct_dev = abs(delta / val_forecast)
+            else: pct_dev = 1.0 if delta != 0 else 0
+            
+            if pct_dev < 0.02: bias = "Mean Reverting"
+            elif delta > 0: bias = "Bullish"
+            else: bias = "Bearish"
+        else: context_str = f"Actual: {actual_str}"
+    else:
+        if val_forecast is not None and val_prev is not None:
+            context_str = f"Forecast ({forecast_str}) vs Prev ({previous_str})"
+            delta = val_forecast - val_prev
+            if val_prev != 0: pct_dev = abs(delta / val_prev)
+            else: pct_dev = 1.0
+            
+            if pct_dev < 0.02: bias = "Mean Reverting"
+            elif delta > 0: bias = "Bullish Exp."
+            else: bias = "Bearish Exp."
+        else: context_str = "Waiting for Data..."
+
+    return context_str, bias
 
 @st.cache_data(ttl=3600)
-def get_smart_news(api_key, query="Finance"):
+def get_financial_news(api_key, query="Finance"):
     if not api_key: return []
-    # If NLTK failed to import, return basic news without sentiment scores
-    if not NLTK_AVAILABLE:
-        try:
-            newsapi = NewsApiClient(api_key=api_key)
-            articles = newsapi.get_top_headlines(category='business', language='en', country='us')['articles'][:5]
-            return [{**art, "sentiment": "N/A", "score": 0, "color": "gray"} for art in articles]
-        except: return []
-
-    # If NLTK works, run sentiment analysis
     try:
         newsapi = NewsApiClient(api_key=api_key)
-        articles = newsapi.get_top_headlines(category='business', language='en', country='us')['articles'][:5]
-        
-        sia = SentimentIntensityAnalyzer()
-        results = []
-        for art in articles:
-            score = sia.polarity_scores(art['title'])['compound']
-            sentiment = "POSITIVE" if score > 0.2 else "NEGATIVE" if score < -0.2 else "NEUTRAL"
-            color = "#00ff00" if score > 0.2 else "#ff3333" if score < -0.2 else "gray"
-            results.append({**art, "sentiment": sentiment, "score": score, "color": color})
-            
-        return results
+        top_headlines = newsapi.get_top_headlines(q=None, category='business', language='en', country='us')
+        articles = []
+        if top_headlines['status'] == 'ok':
+            for art in top_headlines['articles'][:5]:
+                articles.append({"title": art['title'], "source": art['source']['name'], "url": art['url'], "time": art['publishedAt']})
+        return articles
     except: return []
 
-# --- 5. DATA FETCHERS ---
-@st.cache_data(ttl=60)
-def get_data(ticker):
+@st.cache_data(ttl=3600)
+def get_economic_calendar(api_key):
+    if not api_key: return None
+    url = "https://forex-factory-scraper1.p.rapidapi.com/get_calendar_details"
+    now = datetime.now()
+    querystring = {"year": str(now.year), "month": str(now.month), "day": str(now.day)}
+    headers = {"x-rapidapi-host": "forex-factory-scraper1.p.rapidapi.com", "x-rapidapi-key": api_key}
+    
     try:
-        daily = flatten_dataframe(yf.download(ticker, period="1y", interval="1d", progress=False))
-        intraday = flatten_dataframe(yf.download(ticker, period="5d", interval="15m", progress=False))
-        return daily, intraday
-    except: return pd.DataFrame(), pd.DataFrame()
+        response = requests.get(url, headers=headers, params=querystring)
+        data = response.json()
+        raw_events = data if isinstance(data, list) else data.get('data', [])
+        
+        filtered_events = []
+        for e in raw_events:
+            # Filter: USD ONLY & HIGH IMPACT ONLY
+            if e.get('currency') == 'USD' and e.get('impact') == 'High':
+                filtered_events.append(e)
+        return filtered_events
+    except: return []
+
+# --- 7. DATA FETCHERS ---
+@st.cache_data(ttl=60)
+def get_daily_data(ticker):
+    try:
+        data = yf.download(ticker, period="10y", interval="1d", progress=False)
+        return flatten_dataframe(data)
+    except: return pd.DataFrame()
+
+@st.cache_data(ttl=60)
+def get_intraday_data(ticker):
+    try:
+        data = yf.download(ticker, period="5d", interval="15m", progress=False)
+        return flatten_dataframe(data)
+    except: return pd.DataFrame()
+
+@st.cache_data(ttl=300)
+def calculate_volatility_permission(ticker):
+    try:
+        df = yf.download(ticker, period="1y", interval="1d", progress=False)
+        df = flatten_dataframe(df)
+        if df.empty: return None
+        close = df['Close']
+        high, low = df['High'], df['Low']
+        prev_close = close.shift(1)
+        tr = pd.concat([high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
+        tr_pct = (tr / close) * 100
+        tr_pct = tr_pct.dropna()
+        log_tr = np.log(tr_pct)
+        forecast_tr = np.exp(log_tr.ewm(alpha=0.94).mean().iloc[-1])
+        baseline = tr_pct.rolling(20).mean().iloc[-1]
+        return {"forecast": forecast_tr, "baseline": baseline, "is_go": forecast_tr > baseline, "signal": "TRADE PERMITTED" if forecast_tr > baseline else "NO TRADE / CAUTION", "history": tr_pct}
+    except: return None
 
 def terminal_chart_layout(fig, title="", height=350):
     fig.update_layout(
         title=dict(text=title, font=dict(color="#ff9900", family="Arial")),
-        template="plotly_dark", paper_bgcolor="#000000", plot_bgcolor="#000000", height=height,
+        template="plotly_dark",
+        paper_bgcolor="#000000",
+        plot_bgcolor="#000000",
+        height=height,
         margin=dict(l=40, r=40, t=40, b=40),
+        xaxis=dict(showgrid=True, gridcolor="#222", zerolinecolor="#222"),
+        yaxis=dict(showgrid=True, gridcolor="#222", zerolinecolor="#222"),
         font=dict(family="Courier New", color="#e0e0e0")
     )
     return fig
 
 # --- SIDEBAR ---
 with st.sidebar:
-    st.title("COMMAND LINE")
-    selected_asset = st.selectbox("TICKER", list(ASSETS.keys()))
+    st.markdown("<h3 style='color: #ff9900;'>COMMAND LINE</h3>", unsafe_allow_html=True)
+    selected_asset = st.selectbox("SEC / Ticker", list(ASSETS.keys()))
     asset_info = ASSETS[selected_asset]
+    st.markdown("---")
     
-    # Keys
-    news_key = get_api_key("news_api_key")
+    fred_key = get_api_key("fred_api_key")
     rapid_key = get_api_key("rapidapi_key")
+    news_key = get_api_key("news_api_key")
     
-    st.info("Institutional Modules Loaded:\n- GEX/Vanna Surface\n- Dark Pool Scanner\n- VRP Calculator\n- NLP Sentiment")
-    if not NLTK_AVAILABLE:
-        st.warning("⚠️ NLTK not found. Sentiment disabled. Add 'nltk' to requirements.txt")
-        
-    if st.button("HARD REFRESH"): st.cache_data.clear()
+    st.markdown(f"""
+    <div style='font-size:0.8em; color:gray; font-family:Courier New;'>
+    API STATUS:<br>
+    FRED: {'[OK]' if fred_key else '[FAIL]'}<br>
+    RAPID: {'[OK]' if rapid_key else '[FAIL]'}<br>
+    NEWS: {'[OK]' if news_key else '[FAIL]'}
+    </div>
+    """, unsafe_allow_html=True)
+    
+    if st.button(">> REFRESH DATA"): st.cache_data.clear()
 
 # --- MAIN DASHBOARD ---
-st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>INSTITUTIONAL V4.0</span></h1>", unsafe_allow_html=True)
+st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V3.1</span></h1>", unsafe_allow_html=True)
 
-daily_df, intraday_df = get_data(asset_info['ticker'])
-ml_model, ml_prob = get_ml_prediction(asset_info['ticker'])
-regime = get_market_regime(asset_info['ticker'])
-vrp_data = calculate_vrp(daily_df)
-intraday_df = detect_dark_pools(intraday_df)
-greeks_df, greeks_exp, greeks_spot = get_institutional_greeks(asset_info['opt_ticker'])
-news_data = get_smart_news(news_key)
+# Fetch Data
+daily_data = get_daily_data(asset_info['ticker'])
+intraday_data = get_intraday_data(asset_info['ticker'])
+vol_forecast = calculate_volatility_permission(asset_info['ticker'])
+eco_events = get_economic_calendar(rapid_key)
+news_items = get_financial_news(news_key, query="Finance")
 
-# --- 1. HEADS UP DISPLAY (HUD) ---
-if not daily_df.empty:
-    curr = daily_df['Close'].iloc[-1]
-    prev = daily_df['Close'].iloc[-2]
-    pct = (curr / prev - 1) * 100
+# Engines
+_, ml_prob = get_ml_prediction(asset_info['ticker'])
+
+# UPDATED: GEX now returns spot_price as well
+gex_df, gex_date, gex_spot = get_gex_profile(asset_info['opt_ticker'])
+
+vol_profile, poc_price = calculate_volume_profile(intraday_data)
+hurst = calculate_hurst(daily_data['Close'].values) if not daily_data.empty else 0.5
+regime_data = get_market_regime(asset_info['ticker'])
+
+# --- 1. OVERVIEW ---
+if not daily_data.empty:
+    close, high, low = daily_data['Close'], daily_data['High'], daily_data['Low']
+    curr = close.iloc[-1]
+    pct = ((curr - close.iloc[-2]) / close.iloc[-2]) * 100
     
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("PRICE", f"{curr:,.2f}", f"{pct:.2f}%")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("LAST PX", f"{curr:,.2f}", f"{pct:.2f}%")
     
-    # ML
     ml_bias = "BULLISH" if ml_prob > 0.55 else "BEARISH" if ml_prob < 0.45 else "NEUTRAL"
-    c2.metric("AI SIGNAL", ml_bias, f"{abs(ml_prob-0.5)*200:.0f}% Conf")
+    ml_conf = abs(ml_prob - 0.5) * 200
+    ml_color = "bullish" if ml_bias == "BULLISH" else "bearish" if ml_bias == "BEARISH" else "neutral"
     
-    # REGIME
-    if regime: c3.metric("REGIME", regime['regime'], delta=None)
+    c2.markdown(f"""
+    <div class='terminal-box' style="text-align:center; padding:5px;">
+        <div style="font-size:0.8em; color:#ff9900;">AI PREDICTION</div>
+        <span class='{ml_color}'>{ml_bias}</span>
+        <div style="font-size:0.8em; margin-top:5px; color:#aaa;">CONF: {ml_conf:.0f}%</div>
+    </div>
+    """, unsafe_allow_html=True)
     
-    # VRP
-    if vrp_data: 
-        c4.metric("VOL PREMIUM", vrp_data['status'], f"Sprd: {vrp_data['vrp']:.1f}")
-        
-    # DARK POOL COUNT
-    whale_count = intraday_df['Is_Whale'].sum() if not intraday_df.empty else 0
-    c5.metric("DARK POOL BARS", f"{whale_count} Detected", "Last 5d")
+    hurst_type = "TRENDING" if hurst > 0.55 else "MEAN REVERT" if hurst < 0.45 else "RANDOM WALK"
+    h_color = "#00ff00" if hurst > 0.55 else "#ff3333" if hurst < 0.45 else "gray"
+    
+    if regime_data:
+        c3.markdown(f"""
+        <div class='terminal-box' style="padding:10px;">
+            <div style="font-size:0.8em; color:#ff9900;">QUANT REGIME</div>
+            <div style="font-size:1.1em; font-weight:bold;" class='{regime_data['color']}'>{regime_data['regime']}</div>
+            <div style="font-size:0.7em; display:flex; justify-content:space-between; margin-top:5px;">
+                <span>FRACTAL:</span>
+                <span style="color:{h_color}">{hurst_type}</span>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        c3.info("Calculating Regime...")
+    
+    c4.metric("HIGH/LOW", f"{high.max():,.2f} / {low.min():,.2f}")
 
-# --- 2. INSTITUTIONAL CHARTING (DARK POOLS) ---
-if not daily_df.empty:
-    st.markdown("### 👁️ INSTITUTIONAL ORDER FLOW")
-    
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.7, 0.3])
-    
-    # Candle Chart (Intraday)
-    fig.add_trace(go.Candlestick(x=intraday_df.index, open=intraday_df['Open'], high=intraday_df['High'],
-                                 low=intraday_df['Low'], close=intraday_df['Close'], name='Price'), row=1, col=1)
-    
-    # Volume with Dark Pool Highlight
-    colors = ['#9900ff' if x else '#333' for x in intraday_df['Is_Whale']]
-    fig.add_trace(go.Bar(x=intraday_df.index, y=intraday_df['Volume'], marker_color=colors, name='Volume'), row=2, col=1)
-    
-    fig.update_layout(title="5-DAY MICROSTRUCTURE (Purple = >3x Vol / Whale Activity)", xaxis_rangeslider_visible=False)
-    terminal_chart_layout(fig, height=500)
+    fig = go.Figure()
+    fig.add_trace(go.Candlestick(x=daily_data.index, open=daily_data['Open'], high=high, low=low, close=close, name="Price"))
+    if poc_price:
+        fig.add_hline(y=poc_price, line_dash="dash", line_color="yellow", annotation_text="POC", annotation_position="bottom right")
+    terminal_chart_layout(fig, height=400)
+    fig.update_xaxes(rangeslider_visible=False)
     st.plotly_chart(fig, use_container_width=True)
 
-# --- 3. GREEKS SURFACE (GEX + VANNA) ---
+# --- 2. EVENTS & NEWS ---
 st.markdown("---")
-st.markdown("### 🏦 DEALER POSITIONING (GEX & VANNA)")
+col_eco, col_news = st.columns([2, 1])
 
-if greeks_df is not None:
-    g1, g2 = st.columns(2)
-    
-    center = greeks_spot
-    zoom_df = greeks_df[(greeks_df['strike'] > center * 0.9) & (greeks_df['strike'] < center * 1.1)]
-    
-    with g1:
-        # GEX CHART
-        fig_gex = go.Figure()
-        colors = ['#00ff00' if x > 0 else '#ff3333' for x in zoom_df['gamma']]
-        fig_gex.add_trace(go.Bar(x=zoom_df['strike'], y=zoom_df['gamma'], marker_color=colors))
-        fig_gex.add_vline(x=center, line_dash="dot", line_color="white", annotation_text="SPOT")
-        terminal_chart_layout(fig_gex, title=f"GAMMA EXPOSURE (Sticky vs Slippery)")
-        st.plotly_chart(fig_gex, use_container_width=True)
-        
-    with g2:
-        # VANNA CHART
-        fig_van = go.Figure()
-        colors_v = ['#00e6ff' if x > 0 else '#ff00ff' for x in zoom_df['vanna']]
-        fig_van.add_trace(go.Bar(x=zoom_df['strike'], y=zoom_df['vanna'], marker_color=colors_v))
-        fig_van.add_vline(x=center, line_dash="dot", line_color="white", annotation_text="SPOT")
-        terminal_chart_layout(fig_van, title=f"VANNA EXPOSURE (Delta sensitivity to Vol)")
-        st.plotly_chart(fig_van, use_container_width=True)
-        
-    st.caption(f"**Analysis:** Net Gamma: ${greeks_df['gamma'].sum()/1e6:.1f}M | Net Vanna: {greeks_df['vanna'].sum()/1e3:.1f}k")
-    st.caption("*Positive Vanna (Blue) implies dealers buy Delta as Vol rises. Negative Vanna (Pink) implies dealers sell Delta as Vol rises.*")
+with col_eco:
+    st.markdown("### 📅 ECONOMIC EVENTS (USD | HIGH)")
+    if eco_events:
+        cal_data = []
+        for event in eco_events:
+            time_str = event.get('time', 'N/A')
+            name = event.get('event_name', 'Unknown')
+            actual = event.get('actual', '')
+            forecast = event.get('forecast', '')
+            previous = event.get('previous', '')
+            
+            context, bias = analyze_eco_context(actual, forecast, previous)
+            
+            cal_data.append({"TIME": time_str, "EVENT": name, "DATA CONTEXT": context, "BIAS": bias})
+            
+        df_cal = pd.DataFrame(cal_data)
+        def color_bias(val):
+            color = 'white'
+            if 'Bullish' in val: color = '#00ff00' 
+            elif 'Bearish' in val: color = '#ff3333'
+            elif 'Mean' in val: color = '#cccc00'
+            return f'color: {color}'
 
-else:
-    if asset_info['opt_ticker'] is None:
-         st.info("Options data unavailable for this asset class (Crypto/FX).")
-    else:
-         st.warning("Options Data Unavailable or Market Closed.")
+        if not df_cal.empty: 
+            st.dataframe(df_cal.style.map(color_bias, subset=['BIAS']), use_container_width=True, hide_index=True)
+    else: 
+        st.info("NO HIGH IMPACT USD EVENTS SCHEDULED.")
 
-# --- 4. NEWS & SENTIMENT ---
-st.markdown("---")
-n1, n2 = st.columns([2, 1])
-
-with n1:
-    st.markdown("### 📰 NLP SENTIMENT FEED")
-    if news_data:
-        for item in news_data:
+with col_news:
+    st.markdown("### 📰 LATEST WIRE")
+    if news_items:
+        for news in news_items:
             st.markdown(f"""
-            <div style='border-left: 3px solid {item['color']}; padding-left: 10px; margin-bottom: 10px;'>
-                <a href='{item['url']}' target='_blank' style='color: white; text-decoration: none; font-weight: bold;'>{item['title']}</a>
-                <div style='font-size: 0.8em; color: gray; display: flex; justify-content: space-between;'>
-                    <span>{item['source']}</span>
-                    <span style='color:{item['color']}'>{item['sentiment']} ({item['score']})</span>
-                </div>
+            <div style="border-bottom:1px solid #333; padding-bottom:10px; margin-bottom:10px;">
+                <a class='news-link' href='{news['url']}' target='_blank'>▶ {news['title']}</a><br>
+                <span style='font-size:0.7em; color:gray;'>{news['source']} | {news['time'][:10]}</span>
             </div>
             """, unsafe_allow_html=True)
     else:
-        st.info("No news feed active or API Key missing.")
+        st.markdown("<div style='color:gray;'>NO NEWS FEED AVAILABLE</div>", unsafe_allow_html=True)
 
-with n2:
-    st.markdown("### ⚡ RISK SUMMARY")
-    if vrp_data:
-        st.markdown(f"**VRP STATUS:** <span class='{vrp_data['color']}'>{vrp_data['status']}</span>", unsafe_allow_html=True)
-        st.progress(max(0, min(100, int(50 + vrp_data['vrp']*10))))
-        st.caption("Lower = Buy Options (Long Vol) | Higher = Sell Options (Short Vol)")
-        
-    st.markdown("---")
-    st.markdown("**WHALE ACTIVITY**")
-    if whale_count > 5: st.markdown("<span class='whale-alert'>HIGH INST. ACTIVITY</span>", unsafe_allow_html=True)
-    else: st.markdown("<span class='neutral'>NORMAL ACTIVITY</span>", unsafe_allow_html=True)
-
-# --- 5. FOOTER ---
+# --- 3. RISK ANALYSIS ---
 st.markdown("---")
-st.markdown("<div style='text-align:center; color:gray; font-size:0.8em;'>INSTITUTIONAL GRADE TERMINAL V4.0 | POWERED BY PYTHON</div>", unsafe_allow_html=True)
+st.markdown("### ⚡ QUANTITATIVE RISK ANALYSIS")
+
+if not intraday_data.empty and vol_forecast:
+    q1, q2, q3 = st.columns([1, 2, 2])
+    with q1:
+        st.markdown("**VOL FILTER**")
+        badge_class = "vol-go" if vol_forecast['is_go'] else "vol-stop"
+        st.markdown(f"<div style='margin:10px 0;'><span class='{badge_class}'>{vol_forecast['signal']}</span></div>", unsafe_allow_html=True)
+        
+        rr_ratio = 1.5 if vol_forecast['is_go'] else 1.0
+        kelly_pct = 0
+        if ml_prob > 0.5:
+            p = ml_prob
+            q = 1 - p
+            b = rr_ratio
+            kelly_pct = (p - (q / b)) * 100
+        safe_kelly = max(0, kelly_pct * 0.5)
+        
+        st.markdown("**KELLY SIZING**")
+        k_color = "#00ff00" if safe_kelly > 0 else "#ff3333"
+        st.markdown(f"<span style='color:{k_color}; font-size:1.5em; font-weight:bold;'>{safe_kelly:.1f}%</span>", unsafe_allow_html=True)
+        st.caption(f"Based on AI Prob: {ml_prob:.0%}")
+
+    with q2:
+        hist_tr = vol_forecast['history'].tail(40)
+        fig_vol = go.Figure()
+        fig_vol.add_trace(go.Bar(x=hist_tr.index, y=hist_tr.values, name="Realized", marker_color='#333333'))
+        next_day = hist_tr.index[-1] + timedelta(days=1)
+        f_color = '#00ff00' if vol_forecast['is_go'] else '#ff3333'
+        fig_vol.add_trace(go.Bar(x=[next_day], y=[vol_forecast['forecast']], name="Forecast", marker_color=f_color))
+        terminal_chart_layout(fig_vol, title="VOLATILITY REGIME", height=250)
+        st.plotly_chart(fig_vol, use_container_width=True)
+
+    with q3:
+        if vol_profile is not None:
+            fig_vp = go.Figure()
+            colors = ['#00e6ff' if x == poc_price else '#333' for x in vol_profile['PriceLevel']]
+            fig_vp.add_trace(go.Bar(y=vol_profile['PriceLevel'], x=vol_profile['Volume'], orientation='h', marker_color='#ff9900', opacity=0.4))
+            fig_vp.add_hline(y=poc_price, line_dash="dash", line_color="yellow", annotation_text="POC")
+            terminal_chart_layout(fig_vp, title="INTRADAY VOLUME PROFILE", height=250)
+            st.plotly_chart(fig_vp, use_container_width=True)
+
+# --- 4. GEX ---
+st.markdown("---")
+st.markdown("### 🏦 INSTITUTIONAL GAMMA EXPOSURE (GEX)")
+
+if gex_df is not None and gex_spot is not None:
+    g1, g2 = st.columns([3, 1])
+    with g1:
+        # Use the Internal Spot Price for chart centering
+        center_strike = gex_spot 
+        gex_zoom = gex_df[(gex_df['strike'] > center_strike * 0.9) & (gex_df['strike'] < center_strike * 1.1)]
+        
+        fig_gex = go.Figure()
+        colors = ['#00ff00' if x > 0 else '#ff3333' for x in gex_zoom['gex']]
+        fig_gex.add_trace(go.Bar(x=gex_zoom['strike'], y=gex_zoom['gex'], marker_color=colors))
+        fig_gex.add_vline(x=center_strike, line_dash="dot", line_color="white", annotation_text="ETF SPOT")
+        terminal_chart_layout(fig_gex, title=f"NET GAMMA PROFILE (EXP: {gex_date})")
+        st.plotly_chart(fig_gex, use_container_width=True)
+        
+    with g2:
+        total_gex = gex_df['gex'].sum() / 1_000_000
+        sentiment = "LOW VOL (Sticky)" if total_gex > 0 else "HIGH VOL (Slippery)"
+        sent_color = "bullish" if total_gex > 0 else "bearish"
+        
+        st.markdown(f"""
+        <div class='terminal-box'>
+            <div style='color:#ff9900;'>NET GAMMA</div>
+            <div style='font-size:1.5em; color:white;'>${total_gex:.1f}M</div>
+            <div style='margin-top:10px;'><span class='{sent_color}'>{sentiment}</span></div>
+            <p style='font-size:0.7em; margin-top:10px; color:gray;'>
+            Positive = Dealers Suppress Vol<br>Negative = Dealers Amplify Vol
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
+else:
+    if asset_info['opt_ticker'] is None:
+        st.info(f"GEX SKIPPED: OPTIONS DATA NOT AVAILABLE FOR {selected_asset} (CRYPTO/FX).")
+    else:
+        st.warning("GEX CALCULATION SKIPPED: NO OPTIONS CHAIN FOUND OR LIQUIDITY TOO LOW.")
+
+# --- 5. MONTE CARLO & SEASONALITY ---
+st.markdown("---")
+st.markdown("### 🎲 SIMULATION & SEASONALITY")
+s1, s2 = st.columns(2)
+
+with s1:
+    pred_dates, pred_paths = generate_monte_carlo(daily_data)
+    fig_pred = go.Figure()
+    hist_slice = daily_data['Close'].tail(90)
+    fig_pred.add_trace(go.Scatter(x=hist_slice.index, y=hist_slice.values, name='History', line=dict(color='white')))
+    fig_pred.add_trace(go.Scatter(x=pred_dates, y=np.mean(pred_paths, axis=1), name='Avg Path', line=dict(color='#ff9900', dash='dash')))
+    terminal_chart_layout(fig_pred, title="MONTE CARLO PROJECTION")
+    st.plotly_chart(fig_pred, use_container_width=True)
+
+with s2:
+    stats = get_seasonality_stats(daily_data)
+    if stats:
+        fig_d = go.Figure()
+        fig_d.add_trace(go.Bar(x=stats['day_high'].index, y=stats['day_high'].values, marker_color='#00ff00'))
+        terminal_chart_layout(fig_d, title="PROBABILITY OF WEEKLY HIGH")
+        st.plotly_chart(fig_d, use_container_width=True)
+
+# --- 6. CONCLUSION ---
+st.markdown("---")
+st.markdown("### 🏁 EXECUTIVE SUMMARY")
+
+bias_score = 0
+reasons = []
+
+if ml_prob > 0.55: bias_score += 1; reasons.append(f"AI: Model predicts UP ({ml_prob:.0%})")
+elif ml_prob < 0.45: bias_score -= 1; reasons.append(f"AI: Model predicts DOWN ({ml_prob:.0%})")
+
+if regime_data:
+    if "LOW VOL" in regime_data['regime']: bias_score += 1; reasons.append(f"REGIME: {regime_data['regime']}")
+    elif "HIGH VOL" in regime_data['regime']: bias_score -= 1; reasons.append(f"REGIME: {regime_data['regime']}")
+
+if gex_df is not None:
+    if gex_df['gex'].sum() > 0: reasons.append("GEX: Dealers Long Gamma (Expect Range).")
+    else: reasons.append("GEX: Dealers Short Gamma (Expect Breakouts).")
+
+final_text = "BULLISH BIAS" if bias_score > 0 else "BEARISH BIAS" if bias_score < 0 else "NEUTRAL"
+final_color = "bullish" if bias_score > 0 else "bearish" if bias_score < 0 else "neutral"
+
+st.markdown(f"""
+<div class='terminal-box'>
+    <h2 style="text-align:center; margin-top:0; color: #ff9900;">{selected_asset} FINAL OUTLOOK</h2>
+    <div style='text-align:center; margin-bottom:15px;'><span class='{final_color}' style='font-size:1.5em;'>{final_text}</span></div>
+    <hr>
+    <ul style='font-family:Courier New; color:#e0e0e0;'>
+        {''.join([f'<li>{r}</li>' for r in reasons])}
+    </ul>
+</div>
+""", unsafe_allow_html=True)
