@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
-import requests  # <--- Added for API
+import requests
 from fredapi import Fred
 from newsapi import NewsApiClient
 import google.generativeai as genai
@@ -34,7 +34,6 @@ st.markdown("""
     /* Calendar Impact */
     .impact-high { color: #ff4b4b; font-weight: bold; }
     .impact-med { color: #d4af37; font-weight: bold; }
-    .impact-low { color: #cccccc; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -87,7 +86,7 @@ def get_news(api_key, query):
     except Exception as e:
         return f"Error: {str(e)}"
 
-# --- NEW: ECONOMIC CALENDAR FUNCTION ---
+# --- NEW: ECONOMIC CALENDAR FUNCTION (UPDATED) ---
 @st.cache_data(ttl=3600)
 def get_economic_calendar(api_key):
     """Fetches Economic Calendar from RapidAPI for TODAY"""
@@ -102,9 +101,9 @@ def get_economic_calendar(api_key):
         "year": str(now.year),
         "month": str(now.month),
         "day": str(now.day),
-        "currency": "USD", # Filter for USD primarily for US assets
+        "currency": "USD",
         "event_name": "ALL",
-        "timezone": "GMT-05:00 Eastern Time (US & Canada)", # Standard Market Time
+        "timezone": "GMT-05:00 Eastern Time (US & Canada)",
         "time_format": "12h"
     }
     
@@ -117,7 +116,7 @@ def get_economic_calendar(api_key):
         response = requests.get(url, headers=headers, params=querystring)
         data = response.json()
         
-        # Depending on API structure, ensure it returns a list
+        # Handle API response structure
         if isinstance(data, list):
             return data
         elif 'data' in data:
@@ -325,44 +324,89 @@ if not daily_data.empty:
     fig.update_layout(height=400, template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', xaxis_rangeslider_visible=False)
     st.plotly_chart(fig, use_container_width=True)
 
-# --- 2. ECONOMIC CALENDAR (NEW SECTION) ---
+# --- 2. ECONOMIC CALENDAR (ENHANCED WITH CONTEXT) ---
+st.markdown("---")
+st.subheader("📅 Today's Economic Events (USD)")
+
 if eco_events:
-    st.markdown("---")
-    st.subheader("📅 Today's Economic Events (USD)")
-    
-    # Create Dataframe
+    # 1. Parse Data
     cal_data = []
     for event in eco_events:
         impact = event.get('impact', 'Low')
+        
+        # Raw Data Fields
+        actual = event.get('actual', '')
+        forecast = event.get('forecast', '')
+        previous = event.get('previous', '')
+        
+        # 2. Generate Smart Context Logic
+        context_msg = ""
+        
+        # CASE A: Event has happened (Actual exists)
+        if actual and actual != '':
+            if forecast and forecast != '':
+                context_msg = f"Actual ({actual}) vs Forecast ({forecast})"
+            else:
+                context_msg = f"Actual: {actual}"
+                
+        # CASE B: Event upcoming (No Actual, but Forecast exists)
+        elif forecast and forecast != '':
+            if previous and previous != '':
+                context_msg = f"Expectation: {forecast} (Prev: {previous})"
+            else:
+                context_msg = f"Forecast: {forecast}"
+                
+        # CASE C: No data
+        else:
+            context_msg = "Waiting for data..."
+
         cal_data.append({
             "Time": event.get('time', 'N/A'),
             "Currency": event.get('currency', 'USD'),
             "Event": event.get('event_name', 'Unknown'),
             "Impact": impact,
-            "Forecast": event.get('forecast', '-'),
-            "Previous": event.get('previous', '-')
+            "Actual": actual,
+            "Forecast": forecast,
+            "Previous": previous,
+            "Context": context_msg  # <--- New Column
         })
     
     df_cal = pd.DataFrame(cal_data)
     
     if not df_cal.empty:
-        # Style the dataframe for display
+        # Style the dataframe
         def highlight_impact(val):
             color = ''
             if val == 'High': color = 'color: #ff4b4b; font-weight: bold;'
             elif val == 'Medium': color = 'color: #d4af37;'
             return color
 
+        # Show table with context
         st.dataframe(
-            df_cal.style.map(highlight_impact, subset=['Impact']),
+            df_cal[['Time', 'Event', 'Impact', 'Context', 'Actual', 'Forecast', 'Previous']].style.map(highlight_impact, subset=['Impact']),
             use_container_width=True,
             hide_index=True
         )
     else:
-        st.info("No major USD events scheduled for today.")
+        st.info("✅ No USD events scheduled for today.")
+
 else:
+    # --- ERROR HANDLING / DEBUG ---
     if not rapid_key:
-        st.warning("Please add `rapidapi_key` to secrets.toml to see the Economic Calendar.")
+        st.warning("⚠️ **Missing API Key:** Please add `rapidapi_key` to your `secrets.toml` file.")
+    else:
+        # This handles the "Empty List" scenario
+        st.info("ℹ️ No High-Impact USD Data Found Today.")
+        
+        with st.expander("🔍 Debug API (Click if you think this is an error)"):
+            st.write(f"**Date Query:** {datetime.now().strftime('%Y-%m-%d')}")
+            st.write("If the list below is `[]`, the API returned no events for the requested filters.")
+            # We can't show 'response.json()' here easily since it's inside the function, 
+            # but we can explain the common reasons.
+            st.write("**Common Reasons:**")
+            st.write("1. It is a Weekend (Markets Closed).")
+            st.write("2. No 'USD' events are scheduled today.")
+            st.write("3. API Limit Reached.")
 
 # --- 3. VOLATILITY & INTRADAY ---
 st.markdown("---")
