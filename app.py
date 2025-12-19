@@ -15,7 +15,7 @@ from sklearn.ensemble import RandomForestClassifier
 # --- APP CONFIGURATION ---
 st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V2", page_icon="💹")
 
-# --- BLOOMBERG TERMINAL STYLING (CSS) - ORIGINAL CODE #1 ---
+# --- BLOOMBERG TERMINAL STYLING (CSS) ---
 st.markdown("""
 <style>
     /* Main Background - True Black */
@@ -86,7 +86,6 @@ def get_api_key(key_name):
         return st.secrets[key_name]
     return None
 
-# CRITICAL FIX FROM CODE #2
 def flatten_dataframe(df):
     """Robust flattening of MultiIndex columns from yfinance"""
     if df.empty: return df
@@ -96,7 +95,7 @@ def flatten_dataframe(df):
     df = df.loc[:, ~df.columns.duplicated()]
     return df
 
-# --- 1. NEW: MACHINE LEARNING ENGINE (FROM CODE #2) ---
+# --- 1. NEW: MACHINE LEARNING ENGINE ---
 def calculate_rsi(series, period=14):
     delta = series.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
@@ -108,7 +107,7 @@ def calculate_rsi(series, period=14):
 def get_ml_prediction(ticker):
     try:
         df = yf.download(ticker, period="2y", interval="1d", progress=False)
-        df = flatten_dataframe(df) # Fix
+        df = flatten_dataframe(df) 
         if df.empty: return None, 0.5
         
         data = df.copy()
@@ -135,7 +134,7 @@ def get_ml_prediction(ticker):
         return model, prob_up
     except: return None, 0.5
 
-# --- 2. NEW: GAMMA EXPOSURE ENGINE (FROM CODE #2) ---
+# --- 2. NEW: GAMMA EXPOSURE ENGINE (FIXED) ---
 def calculate_black_scholes_gamma(S, K, T, r, sigma):
     if T <= 0 or sigma <= 0: return 0
     d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
@@ -147,20 +146,25 @@ def get_gex_profile(opt_ticker, spot_price):
     try:
         tk = yf.Ticker(opt_ticker)
         exps = tk.options
-        if len(exps) < 2: return None
+        if not exps or len(exps) < 2: return None, None
         target_exp = exps[1]
         
         chain = tk.option_chain(target_exp)
         calls, puts = chain.calls, chain.puts
+        
+        if calls.empty or puts.empty: return None, None
+
         r = 0.045
         exp_date = datetime.strptime(target_exp, "%Y-%m-%d")
-        T = (exp_date - datetime.now()).days / 365.0
+        days_to_exp = (exp_date - datetime.now()).days
+        if days_to_exp <= 0: T = 0.001 
+        else: T = days_to_exp / 365.0
         
         gex_data = []
         strikes = sorted(list(set(calls['strike'].tolist() + puts['strike'].tolist())))
         
         for K in strikes:
-            if K < spot_price * 0.8 or K > spot_price * 1.2: continue # Filter for speed
+            if K < spot_price * 0.7 or K > spot_price * 1.3: continue 
             
             c_row = calls[calls['strike'] == K]
             c_oi = c_row['openInterest'].iloc[0] if not c_row.empty else 0
@@ -176,10 +180,15 @@ def get_gex_profile(opt_ticker, spot_price):
             net_gex = (c_gamma * c_oi - p_gamma * p_oi) * spot_price * 100
             gex_data.append({"strike": K, "gex": net_gex})
             
-        return pd.DataFrame(gex_data), target_exp
-    except: return None, None
+        df = pd.DataFrame(gex_data, columns=['strike', 'gex'])
+        
+        if df.empty: return None, None
+            
+        return df, target_exp
+    except Exception as e:
+        return None, None
 
-# --- 3. NEW: VOLUME PROFILE ENGINE (FROM CODE #2) ---
+# --- 3. NEW: VOLUME PROFILE ENGINE ---
 def calculate_volume_profile(df, bins=50):
     if df.empty: return None, None
     
@@ -197,7 +206,7 @@ def calculate_volume_profile(df, bins=50):
     
     return vol_profile, poc_price
 
-# --- 4. NEW: KELLY CRITERION (FROM CODE #2) ---
+# --- 4. NEW: KELLY CRITERION ---
 def calculate_kelly(prob_win, risk_reward_ratio):
     p = prob_win
     q = 1 - p
@@ -206,7 +215,7 @@ def calculate_kelly(prob_win, risk_reward_ratio):
     f = p - (q / b)
     return max(0, f)
 
-# --- ORIGINAL CODE #1 FUNCTIONS (KEPT) ---
+# --- ORIGINAL CODE #1 FUNCTIONS ---
 
 def parse_eco_value(val_str):
     if not isinstance(val_str, str) or val_str == '': return None
@@ -293,7 +302,6 @@ def get_seasonality_stats(daily_data):
     try:
         df = daily_data.copy()
         df['Week_Num'] = df.index.to_period('W')
-        df['Day_Name'] = df.index.day_name()
         high_days = df.groupby('Week_Num')['High'].idxmax().apply(lambda x: df.loc[x].name.day_name())
         days_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']
         return {'day_high': high_days.value_counts().reindex(days_order, fill_value=0) / len(high_days) * 100}
@@ -357,7 +365,7 @@ eco_events = get_economic_calendar(rapid_key)
 
 # New Engines
 _, ml_prob = get_ml_prediction(asset_info['ticker'])
-gex_df, gex_date = get_gex_profile(asset_info['opt_ticker'], daily_data['Close'].iloc[-1])
+gex_df, gex_date = get_gex_profile(asset_info['opt_ticker'], daily_data['Close'].iloc[-1] if not daily_data.empty else 0)
 vol_profile, poc_price = calculate_volume_profile(intraday_data)
 
 # --- 1. OVERVIEW & AI ---
