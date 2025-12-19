@@ -11,7 +11,7 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.mixture import GaussianMixture
 
 # --- APP CONFIGURATION ---
-st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V3.4", page_icon="💹")
+st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V3.5", page_icon="💹")
 
 # --- BLOOMBERG TERMINAL STYLING (CSS) ---
 st.markdown("""
@@ -226,7 +226,7 @@ def calculate_volume_profile(df, bins=50):
     poc_price = vol_profile.loc[poc_idx, 'PriceLevel']
     return vol_profile, poc_price
 
-# --- 5. MONTE CARLO & ADVANCED SEASONALITY (UPDATED) ---
+# --- 5. MONTE CARLO & ADVANCED SEASONALITY ---
 @st.cache_data(ttl=3600)
 def get_seasonality_stats(daily_data, ticker_name):
     stats = {}
@@ -260,7 +260,7 @@ def get_seasonality_stats(daily_data, ticker_name):
                 intra['Hour'] = intra.index.hour
                 intra['Return'] = intra['Close'].pct_change()
                 
-                # Requested windows: 2-6am, 8-11am, 2pm(14)-6pm(18), 8pm(20)-11pm(23)
+                # Requested windows
                 target_hours = [2,3,4,5,6, 8,9,10,11, 14,15,16,17,18, 20,21,22,23]
                 
                 hourly_perf = intra[intra['Hour'].isin(target_hours)].groupby('Hour')['Return'].mean() * 100
@@ -563,7 +563,7 @@ with st.sidebar:
     if st.button(">> REFRESH DATA"): st.cache_data.clear()
 
 # --- MAIN DASHBOARD ---
-st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V3.4</span></h1>", unsafe_allow_html=True)
+st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V3.5</span></h1>", unsafe_allow_html=True)
 
 # Fetch Data
 daily_data = get_daily_data(asset_info['ticker'])
@@ -837,46 +837,48 @@ pred_dates, pred_paths = generate_monte_carlo(daily_data)
 # Pass ticker to updated function for Hourly Data fetch
 stats = get_seasonality_stats(daily_data, asset_info['ticker']) 
 
-s1, s2 = st.columns([2, 1])
-
-with s1:
-    fig_pred = go.Figure()
-    hist_slice = daily_data['Close'].tail(90)
-    fig_pred.add_trace(go.Scatter(x=hist_slice.index, y=hist_slice.values, name='History', line=dict(color='white')))
-    fig_pred.add_trace(go.Scatter(x=pred_dates, y=np.mean(pred_paths, axis=1), name='Avg Path', line=dict(color='#ff9900', dash='dash')))
-    terminal_chart_layout(fig_pred, title="MONTE CARLO PROJECTION (126 Days)")
-    st.plotly_chart(fig_pred, use_container_width=True)
-
-with s2:
-    if stats:
-        tab_day, tab_week, tab_hour = st.tabs(["DAY", "WEEK", "HOUR (NY)"])
-        
-        with tab_day:
-            fig_d = go.Figure()
-            fig_d.add_trace(go.Bar(x=stats['day_high'].index, y=stats['day_high'].values, marker_color='#00ff00'))
-            terminal_chart_layout(fig_d, title="PROBABILITY OF WEEKLY HIGH", height=250)
-            st.plotly_chart(fig_d, use_container_width=True)
+# --- 1. SEASONALITY TABS (NOW FULL WIDTH & ON TOP) ---
+if stats:
+    st.markdown("#### ⏳ SEASONAL TENDENCIES")
+    tab_hour, tab_day, tab_week = st.tabs(["HOUR (NY)", "DAY", "WEEK"])
+    
+    with tab_hour:
+        if 'hourly_perf' in stats and stats['hourly_perf'] is not None:
+            hp = stats['hourly_perf']
+            fig_h = go.Figure()
+            hour_labels = [f"{h:02d}:00" for h in hp.index]
+            colors = ['#00ff00' if v > 0 else '#ff3333' for v in hp.values]
+            fig_h.add_trace(go.Bar(x=hour_labels, y=hp.values, marker_color=colors))
+            terminal_chart_layout(fig_h, title="AVG RETURN BY HOUR (NY TIME)", height=350)
+            st.plotly_chart(fig_h, use_container_width=True)
+        else:
+            st.info("Hourly data insufficient.")
             
-        with tab_week:
-            if 'week_returns' in stats:
-                wr = stats['week_returns']
-                fig_w = go.Figure()
-                colors = ['#00ff00' if v > 0 else '#ff3333' for v in wr.values]
-                fig_w.add_trace(go.Bar(x=["Wk 1", "Wk 2", "Wk 3", "Wk 4", "Wk 5"], y=wr.values, marker_color=colors))
-                terminal_chart_layout(fig_w, title="AVG RETURN BY WEEK OF MONTH", height=250)
-                st.plotly_chart(fig_w, use_container_width=True)
-                
-        with tab_hour:
-            if 'hourly_perf' in stats and stats['hourly_perf'] is not None:
-                hp = stats['hourly_perf']
-                fig_h = go.Figure()
-                hour_labels = [f"{h:02d}:00" for h in hp.index]
-                colors = ['#00ff00' if v > 0 else '#ff3333' for v in hp.values]
-                fig_h.add_trace(go.Bar(x=hour_labels, y=hp.values, marker_color=colors))
-                terminal_chart_layout(fig_h, title="AVG RETURN (NY TIME)", height=250)
-                st.plotly_chart(fig_h, use_container_width=True)
-            else:
-                st.info("Hourly data insufficient.")
+    with tab_day:
+        fig_d = go.Figure()
+        fig_d.add_trace(go.Bar(x=stats['day_high'].index, y=stats['day_high'].values, marker_color='#00ff00'))
+        terminal_chart_layout(fig_d, title="PROBABILITY OF WEEKLY HIGH", height=350)
+        st.plotly_chart(fig_d, use_container_width=True)
+        
+    with tab_week:
+        if 'week_returns' in stats:
+            wr = stats['week_returns']
+            fig_w = go.Figure()
+            colors = ['#00ff00' if v > 0 else '#ff3333' for v in wr.values]
+            fig_w.add_trace(go.Bar(x=["Wk 1", "Wk 2", "Wk 3", "Wk 4", "Wk 5"], y=wr.values, marker_color=colors))
+            terminal_chart_layout(fig_w, title="AVG RETURN BY WEEK OF MONTH", height=350)
+            st.plotly_chart(fig_w, use_container_width=True)
+
+st.markdown("---")
+
+# --- 2. MONTE CARLO (NOW FULL WIDTH & BELOW) ---
+st.markdown("#### 🎲 MONTE CARLO PROJECTION")
+fig_pred = go.Figure()
+hist_slice = daily_data['Close'].tail(90)
+fig_pred.add_trace(go.Scatter(x=hist_slice.index, y=hist_slice.values, name='History', line=dict(color='white')))
+fig_pred.add_trace(go.Scatter(x=pred_dates, y=np.mean(pred_paths, axis=1), name='Avg Path', line=dict(color='#ff9900', dash='dash')))
+terminal_chart_layout(fig_pred, title="MONTE CARLO PROJECTION (126 Days)", height=400)
+st.plotly_chart(fig_pred, use_container_width=True)
 
 # --- 8. CONCLUSION ---
 st.markdown("---")
