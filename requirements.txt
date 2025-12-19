@@ -10,3 +10,4 @@ scikit-learn
 scipy
 lxml
 pytz
+cot_reports
