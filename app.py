@@ -11,7 +11,7 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.mixture import GaussianMixture
 
 # --- APP CONFIGURATION ---
-st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V3.2", page_icon="💹")
+st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V3.3", page_icon="💹")
 
 # --- BLOOMBERG TERMINAL STYLING (CSS) ---
 st.markdown("""
@@ -65,7 +65,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- CONSTANTS & MAPPINGS (UPDATED FOR NEWS) ---
+# --- CONSTANTS & MAPPINGS ---
 ASSETS = {
     "Gold (Comex)": {"ticker": "GC=F", "opt_ticker": "GLD", "news_query": "Gold Price"},
     "S&P 500": {"ticker": "^GSPC", "opt_ticker": "SPY", "news_query": "S&P 500"},
@@ -300,13 +300,11 @@ def analyze_eco_context(actual_str, forecast_str, previous_str):
 
     return context_str, bias
 
-# --- UPDATED NEWS FUNCTION ---
 @st.cache_data(ttl=3600)
 def get_financial_news(api_key, query="Finance"):
     if not api_key: return []
     try:
         newsapi = NewsApiClient(api_key=api_key)
-        # UPDATED: Uses get_everything with specific query and sort by time
         all_articles = newsapi.get_everything(q=query, language='en', sort_by='publishedAt')
         articles = []
         if all_articles['status'] == 'ok':
@@ -337,7 +335,7 @@ def get_economic_calendar(api_key):
 
 # --- 7. NEW INSTITUTIONAL FEATURES ---
 
-# A. BACKTEST ENGINE (Replaces Vol Permission)
+# A. BACKTEST ENGINE
 @st.cache_data(ttl=300)
 def run_strategy_backtest(ticker):
     try:
@@ -345,25 +343,19 @@ def run_strategy_backtest(ticker):
         df = flatten_dataframe(df)
         if df.empty: return None
 
-        # 1. Calculate Indicators
         df['Returns'] = df['Close'].pct_change()
         df['Range'] = df['High'] - df['Low']
         df['TR'] = pd.concat([df['Range'], (df['High'] - df['Close'].shift(1)).abs(), (df['Low'] - df['Close'].shift(1)).abs()], axis=1).max(axis=1)
         
-        # Volatility Filter Logic
         df['Log_TR'] = np.log(df['TR'] / df['Close'])
         df['Vol_Forecast'] = df['Log_TR'].ewm(span=10).mean()
         df['Vol_Baseline'] = df['Log_TR'].rolling(20).mean()
         
-        # 2. Vectorized Backtest
-        # Signal: Long only if Vol Forecast > Baseline (expansion) AND Trend is up (SMA 50)
         df['SMA_50'] = df['Close'].rolling(50).mean()
         df['Signal'] = np.where((df['Vol_Forecast'] > df['Vol_Baseline']) & (df['Close'] > df['SMA_50']), 1, 0)
         
-        # Shift signal to prevent lookahead bias
         df['Strategy_Returns'] = df['Signal'].shift(1) * df['Returns']
         
-        # 3. Performance Metrics
         df['Cum_BnH'] = (1 + df['Returns']).cumprod()
         df['Cum_Strat'] = (1 + df['Strategy_Returns']).cumprod()
         
@@ -382,23 +374,27 @@ def run_strategy_backtest(ticker):
     except Exception as e:
         return None
 
-# B. ANCHORED VWAP
+# B. UPDATED: SESSION ANCHORED VWAP (RESET DAILY)
 def calculate_vwap_bands(df):
     if df.empty: return df
     df = df.copy()
     
-    # Calculate typical price
+    # Calculate Typical Price
     df['TP'] = (df['High'] + df['Low'] + df['Close']) / 3
     df['VP'] = df['TP'] * df['Volume']
     
-    # Anchor VWAP to the start of the data loaded
-    df['Cum_VP'] = df['VP'].cumsum()
-    df['Cum_Vol'] = df['Volume'].cumsum()
+    # --- CRITICAL UPDATE: Group by Date to reset VWAP daily ---
+    df['Date'] = df.index.date
+    
+    # Cumulative Sums reset daily
+    df['Cum_VP'] = df.groupby('Date')['VP'].cumsum()
+    df['Cum_Vol'] = df.groupby('Date')['Volume'].cumsum()
+    
     df['VWAP'] = df['Cum_VP'] / df['Cum_Vol']
     
-    # Calculate Variance for Bands
+    # Variance Bands
     df['Sq_Dist'] = df['Volume'] * (df['TP'] - df['VWAP'])**2
-    df['Cum_Sq_Dist'] = df['Sq_Dist'].cumsum()
+    df['Cum_Sq_Dist'] = df.groupby('Date')['Sq_Dist'].cumsum()
     df['Std_Dev'] = np.sqrt(df['Cum_Sq_Dist'] / df['Cum_Vol'])
     
     df['Upper_Band_1'] = df['VWAP'] + df['Std_Dev']
@@ -408,7 +404,64 @@ def calculate_vwap_bands(df):
     
     return df
 
-# C. MACRO CORRELATIONS
+# C. NEW: INTRADAY RELATIVE STRENGTH
+@st.cache_data(ttl=60)
+def get_relative_strength(asset_ticker, benchmark_ticker="SPY"):
+    try:
+        asset = yf.download(asset_ticker, period="5d", interval="15m", progress=False)
+        bench = yf.download(benchmark_ticker, period="5d", interval="15m", progress=False)
+        
+        asset = flatten_dataframe(asset)
+        bench = flatten_dataframe(bench)
+        
+        if asset.empty or bench.empty: return pd.DataFrame()
+        
+        df = pd.DataFrame(index=asset.index)
+        df['Asset_Close'] = asset['Close']
+        df['Bench_Close'] = bench['Close']
+        df = df.dropna()
+        
+        current_date = df.index[-1].date()
+        session_data = df[df.index.date == current_date].copy()
+        
+        if session_data.empty: return pd.DataFrame()
+        
+        session_data['Asset_Pct'] = (session_data['Asset_Close'] / session_data['Asset_Close'].iloc[0]) - 1
+        session_data['Bench_Pct'] = (session_data['Bench_Close'] / session_data['Bench_Close'].iloc[0]) - 1
+        
+        session_data['RS_Score'] = session_data['Asset_Pct'] - session_data['Bench_Pct']
+        
+        return session_data
+    except: return pd.DataFrame()
+
+# D. NEW: FLOOR TRADER LEVELS
+def get_key_levels(daily_df):
+    if daily_df.empty: return {}
+    
+    # Use -2 because -1 is the current unfinished day
+    try:
+        last_complete_day = daily_df.iloc[-2]
+    except:
+        return {}
+    
+    high = last_complete_day['High']
+    low = last_complete_day['Low']
+    close = last_complete_day['Close']
+    
+    pivot = (high + low + close) / 3
+    r1 = (2 * pivot) - low
+    s1 = (2 * pivot) - high
+    
+    return {
+        "PDH": high,
+        "PDL": low,
+        "PDC": close,
+        "Pivot": pivot,
+        "R1": r1,
+        "S1": s1
+    }
+
+# E. MACRO CORRELATIONS
 @st.cache_data(ttl=3600)
 def get_correlations(base_ticker):
     try:
@@ -490,14 +543,12 @@ with st.sidebar:
     if st.button(">> REFRESH DATA"): st.cache_data.clear()
 
 # --- MAIN DASHBOARD ---
-st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V3.2</span></h1>", unsafe_allow_html=True)
+st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V3.3 (INTRADAY)</span></h1>", unsafe_allow_html=True)
 
 # Fetch Data
 daily_data = get_daily_data(asset_info['ticker'])
 intraday_data = get_intraday_data(asset_info['ticker'])
 eco_events = get_economic_calendar(rapid_key)
-
-# UPDATED: FETCH NEWS USING SPECIFIC QUERY
 news_items = get_financial_news(news_key, query=asset_info.get('news_query', 'Finance'))
 
 # Engines
@@ -555,7 +606,61 @@ if not daily_data.empty:
     fig.update_xaxes(rangeslider_visible=False)
     st.plotly_chart(fig, use_container_width=True)
 
-# --- 2. EVENTS & NEWS ---
+# --- 2. INTRADAY TACTICAL FEED (NEW) ---
+st.markdown("---")
+st.markdown("### 🔭 INTRADAY TACTICAL FEED")
+
+rs_data = get_relative_strength(asset_info['ticker'])
+key_levels = get_key_levels(daily_data)
+
+col_intra_1, col_intra_2 = st.columns([2, 1])
+
+with col_intra_1:
+    if not rs_data.empty:
+        curr_rs = rs_data['RS_Score'].iloc[-1]
+        rs_color = "#00ff00" if curr_rs > 0 else "#ff3333"
+        rs_text = "OUTPERFORMING SPY" if curr_rs > 0 else "UNDERPERFORMING SPY"
+        
+        st.markdown(f"**RELATIVE STRENGTH (vs SPY)**: <span style='color:{rs_color}'>{rs_text}</span>", unsafe_allow_html=True)
+        
+        fig_rs = go.Figure()
+        fig_rs.add_hline(y=0, line_color="#333", line_dash="dash")
+        fig_rs.add_trace(go.Scatter(x=rs_data.index, y=rs_data['RS_Score'], mode='lines', 
+                                    name='Alpha', line=dict(color=rs_color, width=2), fill='tozeroy'))
+        
+        terminal_chart_layout(fig_rs, title="INTRADAY ALPHA (Real-Time)", height=250)
+        st.plotly_chart(fig_rs, use_container_width=True)
+
+with col_intra_2:
+    st.markdown("**🔑 KEY ALGO LEVELS**")
+    if key_levels:
+        cur_price = intraday_data['Close'].iloc[-1] if not intraday_data.empty else 0
+        
+        def get_lvl_color(level, current):
+            if current == 0: return "white"
+            dist = abs(level - current) / current
+            if dist < 0.002: return "#ffff00" # Near
+            if level > current: return "#ff3333" # Resistance
+            return "#00ff00" # Support
+
+        levels_list = [
+            ("R1 (Resist)", key_levels['R1']),
+            ("PDH (High)", key_levels['PDH']),
+            ("PIVOT (Daily)", key_levels['Pivot']),
+            ("PDL (Low)", key_levels['PDL']),
+            ("S1 (Support)", key_levels['S1'])
+        ]
+        
+        for name, price in levels_list:
+            c_code = get_lvl_color(price, cur_price)
+            st.markdown(f"""
+            <div style="display:flex; justify-content:space-between; border-bottom:1px solid #222; padding:5px;">
+                <span style="color:#aaa;">{name}</span>
+                <span style="color:{c_code}; font-family:monospace;">{price:,.2f}</span>
+            </div>
+            """, unsafe_allow_html=True)
+
+# --- 3. EVENTS & NEWS ---
 st.markdown("---")
 col_eco, col_news = st.columns([2, 1])
 
@@ -600,7 +705,7 @@ with col_news:
     else:
         st.markdown("<div style='color:gray;'>NO NEWS FEED AVAILABLE</div>", unsafe_allow_html=True)
 
-# --- 3. RISK ANALYSIS & BACKTEST ---
+# --- 4. RISK ANALYSIS & BACKTEST ---
 st.markdown("---")
 st.markdown("### ⚡ QUANTITATIVE RISK & EXECUTION")
 
@@ -642,24 +747,33 @@ if not intraday_data.empty and strat_perf:
             terminal_chart_layout(fig_vp, title="INTRADAY VOLUME PROFILE", height=300)
             st.plotly_chart(fig_vp, use_container_width=True)
 
-# --- 4. VWAP EXECUTION ---
-st.markdown("#### 🎯 VWAP LIQUIDITY BANDS")
+# --- 5. VWAP EXECUTION (UPDATED) ---
+st.markdown("#### 🎯 SESSION VWAP + KEY LEVELS")
 vwap_df = calculate_vwap_bands(intraday_data)
 
 if not vwap_df.empty:
     fig_vwap = go.Figure()
-    # Candlestick
-    fig_vwap.add_trace(go.Candlestick(x=vwap_df.index, open=vwap_df['Open'], high=vwap_df['High'], low=vwap_df['Low'], close=vwap_df['Close'], name="Price"))
-    # VWAP & Bands
-    fig_vwap.add_trace(go.Scatter(x=vwap_df.index, y=vwap_df['VWAP'], name="VWAP", line=dict(color='#ff9900', width=2)))
-    fig_vwap.add_trace(go.Scatter(x=vwap_df.index, y=vwap_df['Upper_Band_1'], name="+1 STD", line=dict(color='gray', width=1), opacity=0.5))
-    fig_vwap.add_trace(go.Scatter(x=vwap_df.index, y=vwap_df['Lower_Band_1'], name="-1 STD", line=dict(color='gray', width=1), opacity=0.5))
     
-    terminal_chart_layout(fig_vwap, height=400)
+    # 1. Price Candles
+    fig_vwap.add_trace(go.Candlestick(x=vwap_df.index, open=vwap_df['Open'], high=vwap_df['High'], 
+                                      low=vwap_df['Low'], close=vwap_df['Close'], name="Price"))
+    
+    # 2. Session VWAP
+    fig_vwap.add_trace(go.Scatter(x=vwap_df.index, y=vwap_df['VWAP'], name="Session VWAP", line=dict(color='#ff9900', width=2)))
+    fig_vwap.add_trace(go.Scatter(x=vwap_df.index, y=vwap_df['Upper_Band_1'], name="+1 STD", line=dict(color='gray', width=1), opacity=0.3))
+    fig_vwap.add_trace(go.Scatter(x=vwap_df.index, y=vwap_df['Lower_Band_1'], name="-1 STD", line=dict(color='gray', width=1), opacity=0.3))
+    
+    # 3. Add Key Levels as Horizontal Lines
+    if key_levels:
+        fig_vwap.add_hline(y=key_levels['PDH'], line_dash="dot", line_color="#ff3333", annotation_text="PDH")
+        fig_vwap.add_hline(y=key_levels['PDL'], line_dash="dot", line_color="#00ff00", annotation_text="PDL")
+        fig_vwap.add_hline(y=key_levels['Pivot'], line_width=1, line_color="#00e6ff", annotation_text="DAILY PIVOT")
+
+    terminal_chart_layout(fig_vwap, height=500)
     st.plotly_chart(fig_vwap, use_container_width=True)
 
 
-# --- 5. GEX ---
+# --- 6. GEX ---
 st.markdown("---")
 st.markdown("### 🏦 INSTITUTIONAL GAMMA EXPOSURE (GEX)")
 
@@ -698,7 +812,7 @@ else:
     else:
         st.warning("GEX CALCULATION SKIPPED: NO OPTIONS CHAIN FOUND OR LIQUIDITY TOO LOW.")
 
-# --- 6. MONTE CARLO & SEASONALITY ---
+# --- 7. MONTE CARLO & SEASONALITY ---
 st.markdown("---")
 st.markdown("### 🎲 SIMULATION & SEASONALITY")
 s1, s2 = st.columns(2)
@@ -720,7 +834,7 @@ with s2:
         terminal_chart_layout(fig_d, title="PROBABILITY OF WEEKLY HIGH")
         st.plotly_chart(fig_d, use_container_width=True)
 
-# --- 7. CONCLUSION ---
+# --- 8. CONCLUSION ---
 st.markdown("---")
 st.markdown("### 🏁 EXECUTIVE SUMMARY")
 
