@@ -14,7 +14,7 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.mixture import GaussianMixture
 
 # --- APP CONFIGURATION ---
-st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V3", page_icon="💹")
+st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V4.1", page_icon="💹")
 
 # --- BLOOMBERG TERMINAL STYLING (CSS) ---
 st.markdown("""
@@ -29,7 +29,7 @@ st.markdown("""
     h1, h2, h3, h4 { color: #ff9900 !important; font-family: 'Arial', sans-serif; text-transform: uppercase; letter-spacing: 1px; }
     p, div, span { color: #e0e0e0; }
     
-    /* Metric Styling */
+    /* Metric Styling (The "Terminal" Data Look) */
     div[data-testid="stMetricValue"] { 
         color: #00e6ff !important; 
         font-family: 'Courier New', monospace;
@@ -48,35 +48,35 @@ st.markdown("""
         margin-bottom: 10px;
     }
     
-    /* Signal badges */
+    /* Signal badges - Neon Style */
     .bullish { color: #000000; background-color: #00ff00; padding: 2px 6px; font-weight: bold; }
     .bearish { color: #000000; background-color: #ff3333; padding: 2px 6px; font-weight: bold; }
     .neutral { color: #000000; background-color: #cccccc; padding: 2px 6px; font-weight: bold; }
     
-    /* News Link */
-    .news-link { color: #00e6ff; text-decoration: none; font-size: 0.9em; }
-    .news-link:hover { text-decoration: underline; color: #ff9900; }
-
     /* Volatility Badges */
     .vol-go { border: 1px solid #00ff00; color: #00ff00; padding: 2px 8px; font-weight: bold; letter-spacing: 1px; }
     .vol-stop { border: 1px solid #ff3333; color: #ff3333; padding: 2px 8px; font-weight: bold; letter-spacing: 1px; }
 
-    /* UI Elements */
+    /* Remove rounded corners from buttons/inputs for industrial look */
     .stSelectbox > div > div { border-radius: 0px; background-color: #111; color: white; border: 1px solid #444; }
     button { border-radius: 0px !important; border: 1px solid #ff9900 !important; color: #ff9900 !important; background: black !important; }
+    
+    /* Divider */
     hr { margin: 1em 0; border: 0; border-top: 1px solid #333; }
 </style>
 """, unsafe_allow_html=True)
 
 # --- CONSTANTS & MAPPINGS ---
 ASSETS = {
-    "Gold (Comex)": {"ticker": "GC=F", "opt_ticker": "GLD"},
-    "S&P 500": {"ticker": "^GSPC", "opt_ticker": "SPY"},
-    "NASDAQ": {"ticker": "^IXIC", "opt_ticker": "QQQ"},
-    "EUR/USD": {"ticker": "EURUSD=X", "opt_ticker": None}, # FX usually has no Options in YF
-    "NVIDIA": {"ticker": "NVDA", "opt_ticker": "NVDA"},
-    "Bitcoin": {"ticker": "BTC-USD", "opt_ticker": None}   # Crypto usually has no Options in YF
+    "Gold (Comex)": {"ticker": "GC=F", "opt_ticker": "GLD", "news_query": "Gold Price"},
+    "S&P 500": {"ticker": "^GSPC", "opt_ticker": "SPY", "news_query": "S&P 500"},
+    "NASDAQ": {"ticker": "^IXIC", "opt_ticker": "QQQ", "news_query": "Nasdaq"},
+    "EUR/USD": {"ticker": "EURUSD=X", "opt_ticker": "FXE", "news_query": "EURUSD"},
+    "NVIDIA": {"ticker": "NVDA", "opt_ticker": "NVDA", "news_query": "Nvidia Stock"},
+    "Bitcoin": {"ticker": "BTC-USD", "opt_ticker": "BITO", "news_query": "Bitcoin"}
 }
+
+DXY_TICKER = "DX-Y.NYB"
 
 # --- HELPER FUNCTIONS ---
 
@@ -88,6 +88,7 @@ def get_api_key(key_name):
     return None
 
 def flatten_dataframe(df):
+    """Robust flattening of MultiIndex columns from yfinance"""
     if df.empty: return df
     df = df.copy()
     if isinstance(df.columns, pd.MultiIndex):
@@ -95,8 +96,10 @@ def flatten_dataframe(df):
     df = df.loc[:, ~df.columns.duplicated()]
     return df
 
-# --- 1. QUANT ENGINE (GMM + HURST) ---
+# --- 1. NEW: INSTITUTIONAL QUANT ENGINE (GMM + HURST) ---
+
 def calculate_hurst(series, lags=range(2, 20)):
+    """Calculates the Hurst Exponent to determine fractal dimension."""
     try:
         tau = [np.sqrt(np.std(np.subtract(series[lag:], series[:-lag]))) for lag in lags]
         poly = np.polyfit(np.log(lags), np.log(tau), 1)
@@ -121,6 +124,7 @@ def get_market_regime(ticker):
         
         current_state = gmm.predict(X[[-1]])[0]
         probs = gmm.predict_proba(X[[-1]])[0]
+        
         means = gmm.means_
         state_order = np.argsort(means[:, 1]) 
         
@@ -139,6 +143,13 @@ def get_market_regime(ticker):
     except: return None
 
 # --- 2. MACHINE LEARNING ENGINE ---
+def calculate_rsi(series, period=14):
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
+
 @st.cache_data(ttl=3600)
 def get_ml_prediction(ticker):
     try:
@@ -150,13 +161,15 @@ def get_ml_prediction(ticker):
         data['Returns'] = data['Close'].pct_change()
         data['Target'] = (data['Close'].shift(-1) > data['Close']).astype(int)
         
+        data['RSI'] = calculate_rsi(data['Close'])
         data['Vol_5d'] = data['Returns'].rolling(5).std()
         data['Mom_5d'] = data['Close'].pct_change(5)
+        data['DayOfWeek'] = data.index.dayofweek
         
         data = data.dropna()
         if len(data) < 50: return None, 0.5
         
-        features = ['Vol_5d', 'Mom_5d']
+        features = ['RSI', 'Vol_5d', 'Mom_5d', 'DayOfWeek']
         X = data[features]
         y = data['Target']
         
@@ -168,7 +181,7 @@ def get_ml_prediction(ticker):
         return model, prob_up
     except: return None, 0.5
 
-# --- 3. GAMMA EXPOSURE ENGINE (FIXED & RESTORED) ---
+# --- 3. GAMMA EXPOSURE ENGINE (FIXED) ---
 def calculate_black_scholes_gamma(S, K, T, r, sigma):
     if T <= 0 or sigma <= 0: return 0
     d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
@@ -176,14 +189,18 @@ def calculate_black_scholes_gamma(S, K, T, r, sigma):
     return gamma
 
 @st.cache_data(ttl=3600)
-def get_gex_profile(opt_ticker, spot_price):
-    if opt_ticker is None: return None, None # Skip for assets without options (Crypto/FX)
-
+def get_gex_profile(opt_ticker): # REMOVED SPOT_PRICE ARG TO PREVENT MISMATCH
     try:
         tk = yf.Ticker(opt_ticker)
+        
+        # FIX: FETCH SPOT PRICE OF THE ETF, NOT THE FUTURES
+        hist = tk.history(period="1d")
+        if hist.empty: return None, None
+        spot_price = hist['Close'].iloc[-1]
+
         exps = tk.options
         if not exps or len(exps) < 2: return None, None
-        target_exp = exps[1] 
+        target_exp = exps[1]
         
         chain = tk.option_chain(target_exp)
         calls, puts = chain.calls, chain.puts
@@ -200,6 +217,7 @@ def get_gex_profile(opt_ticker, spot_price):
         strikes = sorted(list(set(calls['strike'].tolist() + puts['strike'].tolist())))
         
         for K in strikes:
+            # Filter relative to the correct spot price
             if K < spot_price * 0.7 or K > spot_price * 1.3: continue 
             
             c_row = calls[calls['strike'] == K]
@@ -217,26 +235,153 @@ def get_gex_profile(opt_ticker, spot_price):
             gex_data.append({"strike": K, "gex": net_gex})
             
         df = pd.DataFrame(gex_data, columns=['strike', 'gex'])
+        
         if df.empty: return None, None
             
-        return df, target_exp
-    except:
-        return None, None
+        return df, target_exp, spot_price # Return spot_price for the chart
+    except Exception as e:
+        return None, None, None
 
 # --- 4. VOLUME PROFILE ENGINE ---
 def calculate_volume_profile(df, bins=50):
     if df.empty: return None, None
+    
     price_range = df['High'].max() - df['Low'].min()
     if price_range == 0: return None, None
+    
     bin_size = price_range / bins
     df['PriceBin'] = ((df['Close'] - df['Low'].min()) // bin_size).astype(int)
+    
     vol_profile = df.groupby('PriceBin')['Volume'].sum().reset_index()
     vol_profile['PriceLevel'] = df['Low'].min() + (vol_profile['PriceBin'] * bin_size)
+    
     poc_idx = vol_profile['Volume'].idxmax()
     poc_price = vol_profile.loc[poc_idx, 'PriceLevel']
+    
     return vol_profile, poc_price
 
-# --- 5. MONTE CARLO & SEASONALITY (RESTORED) ---
+# --- 5. KELLY CRITERION ---
+def calculate_kelly(prob_win, risk_reward_ratio):
+    p = prob_win
+    q = 1 - p
+    b = risk_reward_ratio
+    if b == 0: return 0
+    f = p - (q / b)
+    return max(0, f)
+
+# --- ORIGINAL HELPER FUNCTIONS ---
+
+def parse_eco_value(val_str):
+    if not isinstance(val_str, str) or val_str == '': return None
+    clean = val_str.replace('%', '').replace(',', '')
+    multiplier = 1.0
+    if 'K' in clean.upper(): multiplier = 1000.0; clean = clean.upper().replace('K', '')
+    elif 'M' in clean.upper(): multiplier = 1000000.0; clean = clean.upper().replace('M', '')
+    elif 'B' in clean.upper(): multiplier = 1000000000.0; clean = clean.upper().replace('B', '')
+    try: return float(clean) * multiplier
+    except: return None
+
+# UPDATED EVENT ANALYSIS LOGIC
+def analyze_event_impact(event_name, val_main, val_compare):
+    v1 = parse_eco_value(val_main)
+    v2 = parse_eco_value(val_compare)
+    if v1 is None or v2 is None: return "Neutral"
+    
+    # Define if High Value is Bullish for USD
+    usd_bullish_if_high = {
+        "CPI": True, "PPI": True, "Non-Farm": True, "GDP": True, 
+        "Sales": True, "Confidence": True, "Rates": True,
+        "Unemployment": False, "Claims": False
+    }
+    
+    is_direct_bullish = True 
+    for key, val in usd_bullish_if_high.items():
+        if key.lower() in event_name.lower():
+            is_direct_bullish = val
+            break
+            
+    delta = v1 - v2
+    pct_diff = 0
+    if v2 != 0: pct_diff = abs(delta / v2)
+    
+    # Check for mean reversion (small deviation)
+    if pct_diff < 0.01: return "Mean Reverting"
+    
+    if delta > 0: return "USD Bullish" if is_direct_bullish else "USD Bearish"
+    elif delta < 0: return "USD Bearish" if is_direct_bullish else "USD Bullish"
+    
+    return "Neutral"
+
+@st.cache_data(ttl=60)
+def get_daily_data(ticker):
+    try:
+        data = yf.download(ticker, period="10y", interval="1d", progress=False)
+        return flatten_dataframe(data)
+    except: return pd.DataFrame()
+
+@st.cache_data(ttl=60)
+def get_intraday_data(ticker):
+    try:
+        data = yf.download(ticker, period="5d", interval="15m", progress=False)
+        return flatten_dataframe(data)
+    except: return pd.DataFrame()
+
+@st.cache_data(ttl=3600)
+def get_economic_calendar(api_key):
+    if not api_key: return None
+    url = "https://forex-factory-scraper1.p.rapidapi.com/get_calendar_details"
+    now = datetime.now()
+    querystring = {"year": str(now.year), "month": str(now.month), "day": str(now.day), "currency": "USD"}
+    headers = {"x-rapidapi-host": "forex-factory-scraper1.p.rapidapi.com", "x-rapidapi-key": api_key}
+    try:
+        response = requests.get(url, headers=headers, params=querystring)
+        data = response.json()
+        if isinstance(data, list): return data
+        elif 'data' in data: return data['data']
+        return []
+    except: return []
+
+@st.cache_data(ttl=3600)
+def get_news(api_key, query):
+    if not api_key: return None
+    try:
+        newsapi = NewsApiClient(api_key=api_key)
+        start_date = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+        articles = newsapi.get_everything(q=query, from_param=start_date, language='en', sort_by='relevancy', page_size=5)
+        return articles['articles']
+    except Exception as e:
+        return []
+
+@st.cache_data(ttl=86400)
+def get_macro_regime_data(api_key):
+    if not api_key: return None
+    try:
+        fred = Fred(api_key=api_key)
+        ffr = fred.get_series('FEDFUNDS').iloc[-1]
+        cpi = fred.get_series('CPIAUCSL').pct_change(12).iloc[-1] * 100
+        real_rate = ffr - cpi
+        bias = "BULLISH" if real_rate < 0.5 else "BEARISH"
+        return {"ffr": ffr, "cpi": cpi, "real_rate": real_rate, "bias": bias}
+    except: return None
+
+@st.cache_data(ttl=300)
+def calculate_volatility_permission(ticker):
+    try:
+        df = yf.download(ticker, period="1y", interval="1d", progress=False)
+        df = flatten_dataframe(df)
+        if df.empty: return None
+        close = df['Close']
+        high, low = df['High'], df['Low']
+        prev_close = close.shift(1)
+        tr = pd.concat([high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
+        tr_pct = (tr / close) * 100
+        tr_pct = tr_pct.dropna()
+        log_tr = np.log(tr_pct)
+        forecast_tr = np.exp(log_tr.ewm(alpha=0.94).mean().iloc[-1])
+        baseline = tr_pct.rolling(20).mean().iloc[-1]
+        return {"forecast": forecast_tr, "baseline": baseline, "is_go": forecast_tr > baseline, "signal": "TRADE PERMITTED" if forecast_tr > baseline else "NO TRADE / CAUTION", "history": tr_pct}
+    except: return None
+
 @st.cache_data(ttl=3600)
 def get_seasonality_stats(daily_data):
     try:
@@ -260,119 +405,6 @@ def generate_monte_carlo(stock_data, days=126, simulations=1000):
     for t in range(1, days + 1): price_paths[t] = price_paths[t - 1] * daily_returns[t - 1]
     return pd.date_range(start=close.index[-1], periods=days + 1, freq='B'), price_paths
 
-# --- 6. NEWS & ECONOMICS (UPDATED) ---
-
-def parse_eco_value(val_str):
-    if not isinstance(val_str, str) or val_str == '': return None
-    clean = val_str.replace('%', '').replace(',', '')
-    multiplier = 1.0
-    if 'K' in clean.upper(): multiplier = 1000.0; clean = clean.upper().replace('K', '')
-    elif 'M' in clean.upper(): multiplier = 1000000.0; clean = clean.upper().replace('M', '')
-    elif 'B' in clean.upper(): multiplier = 1000000000.0; clean = clean.upper().replace('B', '')
-    try: return float(clean) * multiplier
-    except: return None
-
-def analyze_eco_context(actual_str, forecast_str, previous_str):
-    is_happened = actual_str is not None and actual_str != ""
-    val_actual = parse_eco_value(actual_str)
-    val_forecast = parse_eco_value(forecast_str)
-    val_prev = parse_eco_value(previous_str)
-    
-    context_str = ""
-    bias = "Neutral"
-    
-    if is_happened:
-        if val_actual is not None and val_forecast is not None:
-            context_str = f"Actual ({actual_str}) vs Forecast ({forecast_str})"
-            delta = val_actual - val_forecast
-            if val_forecast != 0: pct_dev = abs(delta / val_forecast)
-            else: pct_dev = 1.0 if delta != 0 else 0
-            
-            if pct_dev < 0.02: bias = "Mean Reverting"
-            elif delta > 0: bias = "Bullish"
-            else: bias = "Bearish"
-        else: context_str = f"Actual: {actual_str}"
-    else:
-        if val_forecast is not None and val_prev is not None:
-            context_str = f"Forecast ({forecast_str}) vs Prev ({previous_str})"
-            delta = val_forecast - val_prev
-            if val_prev != 0: pct_dev = abs(delta / val_prev)
-            else: pct_dev = 1.0
-            
-            if pct_dev < 0.02: bias = "Mean Reverting"
-            elif delta > 0: bias = "Bullish Exp."
-            else: bias = "Bearish Exp."
-        else: context_str = "Waiting for Data..."
-
-    return context_str, bias
-
-@st.cache_data(ttl=3600)
-def get_financial_news(api_key, query="Finance"):
-    if not api_key: return []
-    try:
-        newsapi = NewsApiClient(api_key=api_key)
-        top_headlines = newsapi.get_top_headlines(q=None, category='business', language='en', country='us')
-        articles = []
-        if top_headlines['status'] == 'ok':
-            for art in top_headlines['articles'][:5]:
-                articles.append({"title": art['title'], "source": art['source']['name'], "url": art['url'], "time": art['publishedAt']})
-        return articles
-    except: return []
-
-@st.cache_data(ttl=3600)
-def get_economic_calendar(api_key):
-    if not api_key: return None
-    url = "https://forex-factory-scraper1.p.rapidapi.com/get_calendar_details"
-    now = datetime.now()
-    querystring = {"year": str(now.year), "month": str(now.month), "day": str(now.day)}
-    headers = {"x-rapidapi-host": "forex-factory-scraper1.p.rapidapi.com", "x-rapidapi-key": api_key}
-    
-    try:
-        response = requests.get(url, headers=headers, params=querystring)
-        data = response.json()
-        raw_events = data if isinstance(data, list) else data.get('data', [])
-        
-        filtered_events = []
-        for e in raw_events:
-            # Filter: USD ONLY & HIGH IMPACT ONLY
-            if e.get('currency') == 'USD' and e.get('impact') == 'High':
-                filtered_events.append(e)
-        return filtered_events
-    except: return []
-
-# --- 7. DATA FETCHERS ---
-@st.cache_data(ttl=60)
-def get_daily_data(ticker):
-    try:
-        data = yf.download(ticker, period="10y", interval="1d", progress=False)
-        return flatten_dataframe(data)
-    except: return pd.DataFrame()
-
-@st.cache_data(ttl=60)
-def get_intraday_data(ticker):
-    try:
-        data = yf.download(ticker, period="5d", interval="15m", progress=False)
-        return flatten_dataframe(data)
-    except: return pd.DataFrame()
-
-@st.cache_data(ttl=300)
-def calculate_volatility_permission(ticker):
-    try:
-        df = yf.download(ticker, period="1y", interval="1d", progress=False)
-        df = flatten_dataframe(df)
-        if df.empty: return None
-        close = df['Close']
-        high, low = df['High'], df['Low']
-        prev_close = close.shift(1)
-        tr = pd.concat([high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
-        tr_pct = (tr / close) * 100
-        tr_pct = tr_pct.dropna()
-        log_tr = np.log(tr_pct)
-        forecast_tr = np.exp(log_tr.ewm(alpha=0.94).mean().iloc[-1])
-        baseline = tr_pct.rolling(20).mean().iloc[-1]
-        return {"forecast": forecast_tr, "baseline": baseline, "is_go": forecast_tr > baseline, "signal": "TRADE PERMITTED" if forecast_tr > baseline else "NO TRADE / CAUTION", "history": tr_pct}
-    except: return None
-
 def terminal_chart_layout(fig, title="", height=350):
     fig.update_layout(
         title=dict(text=title, font=dict(color="#ff9900", family="Arial")),
@@ -393,7 +425,6 @@ with st.sidebar:
     selected_asset = st.selectbox("SEC / Ticker", list(ASSETS.keys()))
     asset_info = ASSETS[selected_asset]
     st.markdown("---")
-    
     fred_key = get_api_key("fred_api_key")
     rapid_key = get_api_key("rapidapi_key")
     news_key = get_api_key("news_api_key")
@@ -410,23 +441,26 @@ with st.sidebar:
     if st.button(">> REFRESH DATA"): st.cache_data.clear()
 
 # --- MAIN DASHBOARD ---
-st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V3</span></h1>", unsafe_allow_html=True)
+st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V4.1</span></h1>", unsafe_allow_html=True)
 
 # Fetch Data
 daily_data = get_daily_data(asset_info['ticker'])
 intraday_data = get_intraday_data(asset_info['ticker'])
+macro_regime = get_macro_regime_data(fred_key)
 vol_forecast = calculate_volatility_permission(asset_info['ticker'])
 eco_events = get_economic_calendar(rapid_key)
-news_items = get_financial_news(news_key, query="Finance")
+latest_news = get_news(news_key, asset_info['news_query'])
 
-# Engines
+# New Quant Engines
 _, ml_prob = get_ml_prediction(asset_info['ticker'])
-gex_df, gex_date = get_gex_profile(asset_info['opt_ticker'], daily_data['Close'].iloc[-1] if not daily_data.empty else 0)
+gex_df, gex_date, gex_spot = get_gex_profile(asset_info['opt_ticker']) # Fixed Function Call
 vol_profile, poc_price = calculate_volume_profile(intraday_data)
+
+# Institutional Engines
 hurst = calculate_hurst(daily_data['Close'].values) if not daily_data.empty else 0.5
 regime_data = get_market_regime(asset_info['ticker'])
 
-# --- 1. OVERVIEW ---
+# --- 1. OVERVIEW & INSTITUTIONAL DASHBOARD ---
 if not daily_data.empty:
     close, high, low = daily_data['Close'], daily_data['High'], daily_data['Low']
     curr = close.iloc[-1]
@@ -435,6 +469,7 @@ if not daily_data.empty:
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("LAST PX", f"{curr:,.2f}", f"{pct:.2f}%")
     
+    # ML WIDGET
     ml_bias = "BULLISH" if ml_prob > 0.55 else "BEARISH" if ml_prob < 0.45 else "NEUTRAL"
     ml_conf = abs(ml_prob - 0.5) * 200
     ml_color = "bullish" if ml_bias == "BULLISH" else "bearish" if ml_bias == "BEARISH" else "neutral"
@@ -447,6 +482,7 @@ if not daily_data.empty:
     </div>
     """, unsafe_allow_html=True)
     
+    # INSTITUTIONAL REGIME WIDGET
     hurst_type = "TRENDING" if hurst > 0.55 else "MEAN REVERT" if hurst < 0.45 else "RANDOM WALK"
     h_color = "#00ff00" if hurst > 0.55 else "#ff3333" if hurst < 0.45 else "gray"
     
@@ -455,9 +491,14 @@ if not daily_data.empty:
         <div class='terminal-box' style="padding:10px;">
             <div style="font-size:0.8em; color:#ff9900;">QUANT REGIME</div>
             <div style="font-size:1.1em; font-weight:bold;" class='{regime_data['color']}'>{regime_data['regime']}</div>
-            <div style="font-size:0.7em; display:flex; justify-content:space-between; margin-top:5px;">
+            <hr style='margin:5px 0; border-top:1px solid #333;'>
+            <div style="font-size:0.7em; display:flex; justify-content:space-between;">
                 <span>FRACTAL:</span>
                 <span style="color:{h_color}">{hurst_type}</span>
+            </div>
+             <div style="font-size:0.7em; display:flex; justify-content:space-between;">
+                <span>MACRO:</span>
+                <span>{macro_regime['bias'] if macro_regime else 'N/A'}</span>
             </div>
         </div>
         """, unsafe_allow_html=True)
@@ -468,76 +509,76 @@ if not daily_data.empty:
 
     fig = go.Figure()
     fig.add_trace(go.Candlestick(x=daily_data.index, open=daily_data['Open'], high=high, low=low, close=close, name="Price"))
+    # Add POC Line if available
     if poc_price:
         fig.add_hline(y=poc_price, line_dash="dash", line_color="yellow", annotation_text="POC", annotation_position="bottom right")
+        
     terminal_chart_layout(fig, height=400)
     fig.update_xaxes(rangeslider_visible=False)
     st.plotly_chart(fig, use_container_width=True)
 
-# --- 2. EVENTS & NEWS ---
+# --- 2. ECONOMIC CALENDAR ---
 st.markdown("---")
-col_eco, col_news = st.columns([2, 1])
+st.markdown("### 📅 HIGH IMPACT ECONOMIC EVENTS (USD)")
 
-with col_eco:
-    st.markdown("### 📅 ECONOMIC EVENTS (USD | HIGH)")
-    if eco_events:
-        cal_data = []
-        for event in eco_events:
-            time_str = event.get('time', 'N/A')
-            name = event.get('event_name', 'Unknown')
-            actual = event.get('actual', '')
-            forecast = event.get('forecast', '')
-            previous = event.get('previous', '')
+if eco_events:
+    cal_data = []
+    for event in eco_events:
+        impact = event.get('impact', 'Low')
+        
+        # FILTER: Only show High impact events
+        if impact != 'High': continue
+        
+        name = event.get('event_name', 'Unknown')
+        actual = event.get('actual', '')
+        forecast = event.get('forecast', '')
+        previous = event.get('previous', '')
+        
+        context_msg = ""
+        bias = "Neutral"
+        
+        if actual and actual != '':
+            bias = analyze_event_impact(name, actual, forecast)
+            context_msg = f"Actual ({actual}) vs Forecast ({forecast})"
+        elif forecast and forecast != '':
+            bias = analyze_event_impact(name, forecast, previous)
+            context_msg = f"Forecast ({forecast}) vs Previous ({previous})"
+        else:
+            context_msg = "No Data"
             
-            context, bias = analyze_eco_context(actual, forecast, previous)
-            
-            cal_data.append({"TIME": time_str, "EVENT": name, "DATA CONTEXT": context, "BIAS": bias})
-            
-        df_cal = pd.DataFrame(cal_data)
-        def color_bias(val):
-            color = 'white'
-            if 'Bullish' in val: color = '#00ff00' 
-            elif 'Bearish' in val: color = '#ff3333'
-            elif 'Mean' in val: color = '#cccc00'
-            return f'color: {color}'
+        cal_data.append({"TIME": event.get('time', 'N/A'), "EVENT": name, "ANALYSIS": context_msg, "BIAS": bias})
+        
+    df_cal = pd.DataFrame(cal_data)
+    
+    def highlight_bias(val):
+        color = ''
+        if 'Bullish' in val: color = '#00ff00'
+        elif 'Bearish' in val: color = '#ff3333'
+        elif 'Mean' in val: color = '#cccccc'
+        return f'color: {color}'
 
-        if not df_cal.empty: 
-            st.dataframe(df_cal.style.map(color_bias, subset=['BIAS']), use_container_width=True, hide_index=True)
+    if not df_cal.empty: 
+        st.dataframe(df_cal.style.map(highlight_bias, subset=['BIAS']), use_container_width=True, hide_index=True)
     else: 
         st.info("NO HIGH IMPACT USD EVENTS SCHEDULED.")
+else: 
+    st.info("CALENDAR DATA UNAVAILABLE.")
 
-with col_news:
-    st.markdown("### 📰 LATEST WIRE")
-    if news_items:
-        for news in news_items:
-            st.markdown(f"""
-            <div style="border-bottom:1px solid #333; padding-bottom:10px; margin-bottom:10px;">
-                <a class='news-link' href='{news['url']}' target='_blank'>▶ {news['title']}</a><br>
-                <span style='font-size:0.7em; color:gray;'>{news['source']} | {news['time'][:10]}</span>
-            </div>
-            """, unsafe_allow_html=True)
-    else:
-        st.markdown("<div style='color:gray;'>NO NEWS FEED AVAILABLE</div>", unsafe_allow_html=True)
-
-# --- 3. RISK ANALYSIS ---
+# --- 3. VOLATILITY, KELLY & VOLUME PROFILE ---
 st.markdown("---")
 st.markdown("### ⚡ QUANTITATIVE RISK ANALYSIS")
 
 if not intraday_data.empty and vol_forecast:
     q1, q2, q3 = st.columns([1, 2, 2])
+    
     with q1:
         st.markdown("**VOL FILTER**")
         badge_class = "vol-go" if vol_forecast['is_go'] else "vol-stop"
         st.markdown(f"<div style='margin:10px 0;'><span class='{badge_class}'>{vol_forecast['signal']}</span></div>", unsafe_allow_html=True)
         
         rr_ratio = 1.5 if vol_forecast['is_go'] else 1.0
-        kelly_pct = 0
-        if ml_prob > 0.5:
-            p = ml_prob
-            q = 1 - p
-            b = rr_ratio
-            kelly_pct = (p - (q / b)) * 100
-        safe_kelly = max(0, kelly_pct * 0.5)
+        kelly_pct = calculate_kelly(ml_prob, rr_ratio) * 100
+        safe_kelly = kelly_pct * 0.5 
         
         st.markdown("**KELLY SIZING**")
         k_color = "#00ff00" if safe_kelly > 0 else "#ff3333"
@@ -563,20 +604,20 @@ if not intraday_data.empty and vol_forecast:
             terminal_chart_layout(fig_vp, title="INTRADAY VOLUME PROFILE", height=250)
             st.plotly_chart(fig_vp, use_container_width=True)
 
-# --- 4. GEX ---
+# --- 4. INSTITUTIONAL GEX ---
 st.markdown("---")
 st.markdown("### 🏦 INSTITUTIONAL GAMMA EXPOSURE (GEX)")
 
-if gex_df is not None:
+if gex_df is not None and gex_spot is not None:
     g1, g2 = st.columns([3, 1])
     with g1:
-        center_strike = curr
+        center_strike = gex_spot # Use the ETF spot price, not futures
         gex_zoom = gex_df[(gex_df['strike'] > center_strike * 0.9) & (gex_df['strike'] < center_strike * 1.1)]
         
         fig_gex = go.Figure()
         colors = ['#00ff00' if x > 0 else '#ff3333' for x in gex_zoom['gex']]
         fig_gex.add_trace(go.Bar(x=gex_zoom['strike'], y=gex_zoom['gex'], marker_color=colors))
-        fig_gex.add_vline(x=curr, line_dash="dot", line_color="white", annotation_text="SPOT")
+        fig_gex.add_vline(x=center_strike, line_dash="dot", line_color="white", annotation_text="ETF SPOT")
         terminal_chart_layout(fig_gex, title=f"NET GAMMA PROFILE (EXP: {gex_date})")
         st.plotly_chart(fig_gex, use_container_width=True)
         
@@ -591,38 +632,27 @@ if gex_df is not None:
             <div style='font-size:1.5em; color:white;'>${total_gex:.1f}M</div>
             <div style='margin-top:10px;'><span class='{sent_color}'>{sentiment}</span></div>
             <p style='font-size:0.7em; margin-top:10px; color:gray;'>
-            Positive = Dealers Suppress Vol<br>Negative = Dealers Amplify Vol
+            Positive Gamma = Dealers suppress vol.<br>
+            Negative Gamma = Dealers amplify vol.
             </p>
         </div>
         """, unsafe_allow_html=True)
 else:
-    # UPDATED ERROR HANDLING LOGIC
-    if asset_info['opt_ticker'] is None:
-        st.info(f"GEX SKIPPED: OPTIONS DATA NOT AVAILABLE FOR {selected_asset} (CRYPTO/FX).")
-    else:
-        st.warning("GEX CALCULATION SKIPPED: NO OPTIONS CHAIN FOUND OR LIQUIDITY TOO LOW.")
+    st.info("NO OPTIONS DATA AVAILABLE OR GEX CALCULATION FAILED.")
 
-# --- 5. MONTE CARLO & SEASONALITY (RESTORED) ---
+# --- 5. LATEST NEWS WIRE ---
 st.markdown("---")
-st.markdown("### 🎲 SIMULATION & SEASONALITY")
-s1, s2 = st.columns(2)
-
-with s1:
-    pred_dates, pred_paths = generate_monte_carlo(daily_data)
-    fig_pred = go.Figure()
-    hist_slice = daily_data['Close'].tail(90)
-    fig_pred.add_trace(go.Scatter(x=hist_slice.index, y=hist_slice.values, name='History', line=dict(color='white')))
-    fig_pred.add_trace(go.Scatter(x=pred_dates, y=np.mean(pred_paths, axis=1), name='Avg Path', line=dict(color='#ff9900', dash='dash')))
-    terminal_chart_layout(fig_pred, title="MONTE CARLO PROJECTION")
-    st.plotly_chart(fig_pred, use_container_width=True)
-
-with s2:
-    stats = get_seasonality_stats(daily_data)
-    if stats:
-        fig_d = go.Figure()
-        fig_d.add_trace(go.Bar(x=stats['day_high'].index, y=stats['day_high'].values, marker_color='#00ff00'))
-        terminal_chart_layout(fig_d, title="PROBABILITY OF WEEKLY HIGH")
-        st.plotly_chart(fig_d, use_container_width=True)
+st.markdown("### 📰 LATEST WIRE")
+if latest_news:
+    for article in latest_news:
+        st.markdown(f"""
+        <div style='border-bottom: 1px solid #333; padding: 10px 0;'>
+            <a href='{article['url']}' target='_blank' style='text-decoration: none; color: #00e6ff; font-weight: bold;'>{article['title']}</a>
+            <div style='font-size: 0.8em; color: gray; margin-top: 5px;'>{article['source']['name']} - {article['publishedAt'][:10]}</div>
+        </div>
+        """, unsafe_allow_html=True)
+else:
+    st.info("NO NEWS FOUND OR API KEY MISSING.")
 
 # --- 6. CONCLUSION ---
 st.markdown("---")
@@ -635,11 +665,12 @@ if ml_prob > 0.55: bias_score += 1; reasons.append(f"AI: Model predicts UP ({ml_
 elif ml_prob < 0.45: bias_score -= 1; reasons.append(f"AI: Model predicts DOWN ({ml_prob:.0%})")
 
 if regime_data:
-    if "LOW VOL" in regime_data['regime']: bias_score += 1; reasons.append(f"REGIME: {regime_data['regime']}")
-    elif "HIGH VOL" in regime_data['regime']: bias_score -= 1; reasons.append(f"REGIME: {regime_data['regime']}")
+    if "LOW VOL" in regime_data['regime']: bias_score += 1; reasons.append(f"REGIME: Market is in {regime_data['regime']} (Bullish).")
+    elif "HIGH VOL" in regime_data['regime']: bias_score -= 1; reasons.append(f"REGIME: Market is in {regime_data['regime']} (Bearish/Crisis).")
+    else: reasons.append(f"REGIME: Market is in {regime_data['regime']} (Neutral/Chop).")
 
 if gex_df is not None:
-    if gex_df['gex'].sum() > 0: reasons.append("GEX: Dealers Long Gamma (Expect Range).")
+    if gex_df['gex'].sum() > 0: reasons.append("GEX: Dealers Long Gamma (Expect Range/Low Vol).")
     else: reasons.append("GEX: Dealers Short Gamma (Expect Breakouts).")
 
 final_text = "BULLISH BIAS" if bias_score > 0 else "BEARISH BIAS" if bias_score < 0 else "NEUTRAL"
@@ -653,5 +684,8 @@ st.markdown(f"""
     <ul style='font-family:Courier New; color:#e0e0e0;'>
         {''.join([f'<li>{r}</li>' for r in reasons])}
     </ul>
+    <div style='text-align:center; margin-top:10px;'>
+        SUGGESTED KELLY SIZE: <span style='color:#ff9900; font-weight:bold'>{safe_kelly:.1f}%</span>
+    </div>
 </div>
 """, unsafe_allow_html=True)
