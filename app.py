@@ -5,6 +5,7 @@ import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
 import requests
+import re
 from fredapi import Fred
 from newsapi import NewsApiClient
 import google.generativeai as genai
@@ -30,10 +31,6 @@ st.markdown("""
     /* Volatility Badges */
     .vol-go { background-color: rgba(0, 255, 0, 0.2); color: #00ff00; padding: 4px 10px; border-radius: 4px; font-weight: bold; border: 1px solid #00ff00; }
     .vol-stop { background-color: rgba(255, 75, 75, 0.2); color: #ff4b4b; padding: 4px 10px; border-radius: 4px; font-weight: bold; border: 1px solid #ff4b4b; }
-    
-    /* Calendar Impact */
-    .impact-high { color: #ff4b4b; font-weight: bold; }
-    .impact-med { color: #d4af37; font-weight: bold; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -56,6 +53,82 @@ def get_api_key(key_name):
     if key_name in st.secrets:
         return st.secrets[key_name]
     return None
+
+# --- NEW: SENTIMENT LOGIC ENGINE ---
+def parse_eco_value(val_str):
+    """Converts strings like '3.5%', '200K' to floats for comparison"""
+    if not isinstance(val_str, str) or val_str == '': return None
+    
+    # Remove common non-numeric chars
+    clean = val_str.replace('%', '').replace(',', '')
+    multiplier = 1.0
+    
+    if 'K' in clean.upper():
+        multiplier = 1000.0
+        clean = clean.upper().replace('K', '')
+    elif 'M' in clean.upper():
+        multiplier = 1000000.0
+        clean = clean.upper().replace('M', '')
+    elif 'B' in clean.upper():
+        multiplier = 1000000000.0
+        clean = clean.upper().replace('B', '')
+        
+    try:
+        return float(clean) * multiplier
+    except:
+        return None
+
+def analyze_event_impact(event_name, val_main, val_compare, is_actual):
+    """
+    Determines Bullish/Bearish/Mean Reverting based on event type.
+    val_main: Actual (if happened) or Forecast (if upcoming)
+    val_compare: Forecast (if happened) or Previous (if upcoming)
+    """
+    v1 = parse_eco_value(val_main)
+    v2 = parse_eco_value(val_compare)
+    
+    if v1 is None or v2 is None: return "Neutral"
+
+    # Define Event Logic (True = Higher is Bullish for USD)
+    # Note: Most "Good News" is Bullish USD. Unemployment is inverse.
+    usd_logic = {
+        "CPI": True, "PPI": True, "Non-Farm": True, "GDP": True, 
+        "Sales": True, "Confidence": True, "Rates": True,
+        "Unemployment": False, "Claims": False
+    }
+    
+    # Default to "Higher is Bullish USD" if unknown
+    is_direct = True 
+    for key, val in usd_logic.items():
+        if key.lower() in event_name.lower():
+            is_direct = val
+            break
+            
+    # Calculate Deviation
+    delta = v1 - v2
+    pct_diff = 0
+    if v2 != 0: pct_diff = abs(delta / v2)
+    
+    # MEAN REVERTING LOGIC: If values are extremely close (< 1% diff), assume priced in/neutral
+    # For percentages (like 3.4% vs 3.5%), we look at absolute diff
+    is_percentage_data = "%" in str(val_main)
+    is_mean_reverting = False
+    
+    if is_percentage_data and abs(delta) < 0.05: is_mean_reverting = True # e.g. 3.4 vs 3.4
+    elif not is_percentage_data and pct_diff < 0.01: is_mean_reverting = True # e.g. 200k vs 201k
+    
+    if is_mean_reverting:
+        return "Mean Reverting (Neutral)"
+    
+    # DIRECTIONAL LOGIC
+    if delta > 0: # Higher than expected/prev
+        if is_direct: return "USD Bullish"
+        else: return "USD Bearish"
+    elif delta < 0: # Lower than expected/prev
+        if is_direct: return "USD Bearish"
+        else: return "USD Bullish"
+    
+    return "Mean Reverting"
 
 # --- DATA FETCHING ---
 
@@ -86,15 +159,13 @@ def get_news(api_key, query):
     except Exception as e:
         return f"Error: {str(e)}"
 
-# --- NEW: ECONOMIC CALENDAR FUNCTION (UPDATED) ---
+# --- NEW: ECONOMIC CALENDAR FUNCTION ---
 @st.cache_data(ttl=3600)
 def get_economic_calendar(api_key):
     """Fetches Economic Calendar from RapidAPI for TODAY"""
     if not api_key: return None
     
     url = "https://forex-factory-scraper1.p.rapidapi.com/get_calendar_details"
-    
-    # Dynamic Date (Today)
     now = datetime.now()
     
     querystring = {
@@ -107,20 +178,13 @@ def get_economic_calendar(api_key):
         "time_format": "12h"
     }
     
-    headers = {
-        "x-rapidapi-host": "forex-factory-scraper1.p.rapidapi.com",
-        "x-rapidapi-key": api_key
-    }
+    headers = {"x-rapidapi-host": "forex-factory-scraper1.p.rapidapi.com", "x-rapidapi-key": api_key}
     
     try:
         response = requests.get(url, headers=headers, params=querystring)
         data = response.json()
-        
-        # Handle API response structure
-        if isinstance(data, list):
-            return data
-        elif 'data' in data:
-            return data['data']
+        if isinstance(data, list): return data
+        elif 'data' in data: return data['data']
         return []
     except Exception as e:
         return []
@@ -324,37 +388,39 @@ if not daily_data.empty:
     fig.update_layout(height=400, template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', xaxis_rangeslider_visible=False)
     st.plotly_chart(fig, use_container_width=True)
 
-# --- 2. ECONOMIC CALENDAR (ENHANCED WITH CONTEXT) ---
+# --- 2. ECONOMIC CALENDAR (WITH SENTIMENT) ---
 st.markdown("---")
 st.subheader("📅 Today's Economic Events (USD)")
 
 if eco_events:
-    # 1. Parse Data
+    # 1. Parse & Analyze Data
     cal_data = []
     for event in eco_events:
         impact = event.get('impact', 'Low')
-        
-        # Raw Data Fields
+        name = event.get('event_name', 'Unknown')
         actual = event.get('actual', '')
         forecast = event.get('forecast', '')
         previous = event.get('previous', '')
         
         # 2. Generate Smart Context Logic
         context_msg = ""
+        sentiment = "Neutral"
         
         # CASE A: Event has happened (Actual exists)
         if actual and actual != '':
+            bias = analyze_event_impact(name, actual, forecast, is_actual=True)
             if forecast and forecast != '':
-                context_msg = f"Actual ({actual}) vs Forecast ({forecast})"
+                context_msg = f"Act: {actual} vs Fcst: {forecast} ({bias})"
             else:
-                context_msg = f"Actual: {actual}"
+                context_msg = f"Act: {actual} (No Fcst)"
                 
         # CASE B: Event upcoming (No Actual, but Forecast exists)
         elif forecast and forecast != '':
+            bias = analyze_event_impact(name, forecast, previous, is_actual=False)
             if previous and previous != '':
-                context_msg = f"Expectation: {forecast} (Prev: {previous})"
+                context_msg = f"Fcst: {forecast} vs Prev: {previous} ({bias})"
             else:
-                context_msg = f"Forecast: {forecast}"
+                context_msg = f"Fcst: {forecast}"
                 
         # CASE C: No data
         else:
@@ -363,27 +429,24 @@ if eco_events:
         cal_data.append({
             "Time": event.get('time', 'N/A'),
             "Currency": event.get('currency', 'USD'),
-            "Event": event.get('event_name', 'Unknown'),
+            "Event": name,
             "Impact": impact,
-            "Actual": actual,
-            "Forecast": forecast,
-            "Previous": previous,
-            "Context": context_msg  # <--- New Column
+            "Analysis": context_msg # <--- Merged Column for Cleanliness
         })
     
     df_cal = pd.DataFrame(cal_data)
     
     if not df_cal.empty:
-        # Style the dataframe
-        def highlight_impact(val):
-            color = ''
-            if val == 'High': color = 'color: #ff4b4b; font-weight: bold;'
-            elif val == 'Medium': color = 'color: #d4af37;'
-            return color
+        # Style the dataframe: Color code Impact and Analysis
+        def highlight_cols(val):
+            if 'High' in str(val): return 'color: #ff4b4b; font-weight: bold;'
+            if 'Bullish' in str(val): return 'color: #00ff00;'
+            if 'Bearish' in str(val): return 'color: #ff4b4b;'
+            if 'Mean Reverting' in str(val): return 'color: #cccccc;'
+            return ''
 
-        # Show table with context
         st.dataframe(
-            df_cal[['Time', 'Event', 'Impact', 'Context', 'Actual', 'Forecast', 'Previous']].style.map(highlight_impact, subset=['Impact']),
+            df_cal[['Time', 'Event', 'Impact', 'Analysis']].style.map(highlight_cols),
             use_container_width=True,
             hide_index=True
         )
@@ -391,22 +454,10 @@ if eco_events:
         st.info("✅ No USD events scheduled for today.")
 
 else:
-    # --- ERROR HANDLING / DEBUG ---
     if not rapid_key:
         st.warning("⚠️ **Missing API Key:** Please add `rapidapi_key` to your `secrets.toml` file.")
     else:
-        # This handles the "Empty List" scenario
-        st.info("ℹ️ No High-Impact USD Data Found Today.")
-        
-        with st.expander("🔍 Debug API (Click if you think this is an error)"):
-            st.write(f"**Date Query:** {datetime.now().strftime('%Y-%m-%d')}")
-            st.write("If the list below is `[]`, the API returned no events for the requested filters.")
-            # We can't show 'response.json()' here easily since it's inside the function, 
-            # but we can explain the common reasons.
-            st.write("**Common Reasons:**")
-            st.write("1. It is a Weekend (Markets Closed).")
-            st.write("2. No 'USD' events are scheduled today.")
-            st.write("3. API Limit Reached.")
+        st.info("ℹ️ No Data Found Today (Check if Market is Closed).")
 
 # --- 3. VOLATILITY & INTRADAY ---
 st.markdown("---")
