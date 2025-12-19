@@ -3,18 +3,15 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-import plotly.express as px
 import requests
-from fredapi import Fred
 from newsapi import NewsApiClient
 from datetime import datetime, timedelta
-from scipy.interpolate import UnivariateSpline
 from scipy.stats import norm
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.mixture import GaussianMixture
 
 # --- APP CONFIGURATION ---
-st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V3", page_icon="💹")
+st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V3.1", page_icon="💹")
 
 # --- BLOOMBERG TERMINAL STYLING (CSS) ---
 st.markdown("""
@@ -73,9 +70,9 @@ ASSETS = {
     "Gold (Comex)": {"ticker": "GC=F", "opt_ticker": "GLD"},
     "S&P 500": {"ticker": "^GSPC", "opt_ticker": "SPY"},
     "NASDAQ": {"ticker": "^IXIC", "opt_ticker": "QQQ"},
-    "EUR/USD": {"ticker": "EURUSD=X", "opt_ticker": None}, # FX usually has no Options in YF
+    "EUR/USD": {"ticker": "EURUSD=X", "opt_ticker": None}, 
     "NVIDIA": {"ticker": "NVDA", "opt_ticker": "NVDA"},
-    "Bitcoin": {"ticker": "BTC-USD", "opt_ticker": None}   # Crypto usually has no Options in YF
+    "Bitcoin": {"ticker": "BTC-USD", "opt_ticker": None}
 }
 
 # --- HELPER FUNCTIONS ---
@@ -168,60 +165,90 @@ def get_ml_prediction(ticker):
         return model, prob_up
     except: return None, 0.5
 
-# --- 3. GAMMA EXPOSURE ENGINE (FIXED & RESTORED) ---
+# --- 3. UPDATED GAMMA EXPOSURE ENGINE (FROM EXTRACTED CODE) ---
+
 def calculate_black_scholes_gamma(S, K, T, r, sigma):
+    """
+    Calculates the Gamma of an option using Black-Scholes.
+    """
     if T <= 0 or sigma <= 0: return 0
     d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
     gamma = norm.pdf(d1) / (S * sigma * np.sqrt(T))
     return gamma
 
 @st.cache_data(ttl=3600)
-def get_gex_profile(opt_ticker, spot_price):
-    if opt_ticker is None: return None, None # Skip for assets without options (Crypto/FX)
+def get_gex_profile(opt_ticker):
+    """
+    Fetches option chain, calculates Gamma per strike, and computes Net GEX.
+    Returns: DataFrame of strikes/GEX, Expiry Date, and Current Spot Price.
+    """
+    if opt_ticker is None: return None, None, None
 
     try:
         tk = yf.Ticker(opt_ticker)
-        exps = tk.options
-        if not exps or len(exps) < 2: return None, None
-        target_exp = exps[1] 
         
+        # 1. Fetch Spot Price (Underlying)
+        hist = tk.history(period="1d")
+        if hist.empty: return None, None, None
+        spot_price = hist['Close'].iloc[-1]
+
+        # 2. Get Expiration Dates
+        exps = tk.options
+        if not exps or len(exps) < 2: return None, None, None
+        
+        # Select the next expiration (usually index 1 to avoid 0DTE noise)
+        target_exp = exps[1]
+        
+        # 3. Fetch Option Chain
         chain = tk.option_chain(target_exp)
         calls, puts = chain.calls, chain.puts
         
-        if calls.empty or puts.empty: return None, None
+        if calls.empty or puts.empty: return None, None, None
 
-        r = 0.045
+        # 4. Setup Calculation Variables
+        r = 0.045  # Risk-free rate assumption (4.5%)
         exp_date = datetime.strptime(target_exp, "%Y-%m-%d")
         days_to_exp = (exp_date - datetime.now()).days
+        
+        # Avoid division by zero for expiring options
         if days_to_exp <= 0: T = 0.001 
         else: T = days_to_exp / 365.0
         
         gex_data = []
+        # Get unique strikes from both calls and puts
         strikes = sorted(list(set(calls['strike'].tolist() + puts['strike'].tolist())))
         
+        # 5. Iterate Strikes and Calculate Net Gamma
         for K in strikes:
+            # Filter: Only calculate for strikes within 30% of spot price (Optimization)
             if K < spot_price * 0.7 or K > spot_price * 1.3: continue 
             
+            # Get Call Data
             c_row = calls[calls['strike'] == K]
             c_oi = c_row['openInterest'].iloc[0] if not c_row.empty else 0
             c_iv = c_row['impliedVolatility'].iloc[0] if not c_row.empty and 'impliedVolatility' in c_row.columns else 0.2
             
+            # Get Put Data
             p_row = puts[puts['strike'] == K]
             p_oi = p_row['openInterest'].iloc[0] if not p_row.empty else 0
             p_iv = p_row['impliedVolatility'].iloc[0] if not p_row.empty and 'impliedVolatility' in p_row.columns else 0.2
             
+            # Calculate Gamma
             c_gamma = calculate_black_scholes_gamma(spot_price, K, T, r, c_iv)
             p_gamma = calculate_black_scholes_gamma(spot_price, K, T, r, p_iv)
             
+            # Calculate Net GEX: (Call Gamma * OI - Put Gamma * OI) * Spot * 100 (contract size)
             net_gex = (c_gamma * c_oi - p_gamma * p_oi) * spot_price * 100
             gex_data.append({"strike": K, "gex": net_gex})
             
         df = pd.DataFrame(gex_data, columns=['strike', 'gex'])
-        if df.empty: return None, None
+        
+        if df.empty: return None, None, None
             
-        return df, target_exp
-    except:
-        return None, None
+        return df, target_exp, spot_price
+
+    except Exception as e:
+        return None, None, None
 
 # --- 4. VOLUME PROFILE ENGINE ---
 def calculate_volume_profile(df, bins=50):
@@ -236,7 +263,7 @@ def calculate_volume_profile(df, bins=50):
     poc_price = vol_profile.loc[poc_idx, 'PriceLevel']
     return vol_profile, poc_price
 
-# --- 5. MONTE CARLO & SEASONALITY (RESTORED) ---
+# --- 5. MONTE CARLO & SEASONALITY ---
 @st.cache_data(ttl=3600)
 def get_seasonality_stats(daily_data):
     try:
@@ -260,7 +287,7 @@ def generate_monte_carlo(stock_data, days=126, simulations=1000):
     for t in range(1, days + 1): price_paths[t] = price_paths[t - 1] * daily_returns[t - 1]
     return pd.date_range(start=close.index[-1], periods=days + 1, freq='B'), price_paths
 
-# --- 6. NEWS & ECONOMICS (UPDATED) ---
+# --- 6. NEWS & ECONOMICS ---
 
 def parse_eco_value(val_str):
     if not isinstance(val_str, str) or val_str == '': return None
@@ -410,7 +437,7 @@ with st.sidebar:
     if st.button(">> REFRESH DATA"): st.cache_data.clear()
 
 # --- MAIN DASHBOARD ---
-st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V3</span></h1>", unsafe_allow_html=True)
+st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V3.1</span></h1>", unsafe_allow_html=True)
 
 # Fetch Data
 daily_data = get_daily_data(asset_info['ticker'])
@@ -421,7 +448,10 @@ news_items = get_financial_news(news_key, query="Finance")
 
 # Engines
 _, ml_prob = get_ml_prediction(asset_info['ticker'])
-gex_df, gex_date = get_gex_profile(asset_info['opt_ticker'], daily_data['Close'].iloc[-1] if not daily_data.empty else 0)
+
+# UPDATED: GEX now returns spot_price as well
+gex_df, gex_date, gex_spot = get_gex_profile(asset_info['opt_ticker'])
+
 vol_profile, poc_price = calculate_volume_profile(intraday_data)
 hurst = calculate_hurst(daily_data['Close'].values) if not daily_data.empty else 0.5
 regime_data = get_market_regime(asset_info['ticker'])
@@ -567,16 +597,17 @@ if not intraday_data.empty and vol_forecast:
 st.markdown("---")
 st.markdown("### 🏦 INSTITUTIONAL GAMMA EXPOSURE (GEX)")
 
-if gex_df is not None:
+if gex_df is not None and gex_spot is not None:
     g1, g2 = st.columns([3, 1])
     with g1:
-        center_strike = curr
+        # Use the Internal Spot Price for chart centering
+        center_strike = gex_spot 
         gex_zoom = gex_df[(gex_df['strike'] > center_strike * 0.9) & (gex_df['strike'] < center_strike * 1.1)]
         
         fig_gex = go.Figure()
         colors = ['#00ff00' if x > 0 else '#ff3333' for x in gex_zoom['gex']]
         fig_gex.add_trace(go.Bar(x=gex_zoom['strike'], y=gex_zoom['gex'], marker_color=colors))
-        fig_gex.add_vline(x=curr, line_dash="dot", line_color="white", annotation_text="SPOT")
+        fig_gex.add_vline(x=center_strike, line_dash="dot", line_color="white", annotation_text="ETF SPOT")
         terminal_chart_layout(fig_gex, title=f"NET GAMMA PROFILE (EXP: {gex_date})")
         st.plotly_chart(fig_gex, use_container_width=True)
         
@@ -596,13 +627,12 @@ if gex_df is not None:
         </div>
         """, unsafe_allow_html=True)
 else:
-    # UPDATED ERROR HANDLING LOGIC
     if asset_info['opt_ticker'] is None:
         st.info(f"GEX SKIPPED: OPTIONS DATA NOT AVAILABLE FOR {selected_asset} (CRYPTO/FX).")
     else:
         st.warning("GEX CALCULATION SKIPPED: NO OPTIONS CHAIN FOUND OR LIQUIDITY TOO LOW.")
 
-# --- 5. MONTE CARLO & SEASONALITY (RESTORED) ---
+# --- 5. MONTE CARLO & SEASONALITY ---
 st.markdown("---")
 st.markdown("### 🎲 SIMULATION & SEASONALITY")
 s1, s2 = st.columns(2)
