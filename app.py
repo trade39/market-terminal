@@ -12,8 +12,8 @@ import google.generativeai as genai
 from datetime import datetime, timedelta
 from scipy.interpolate import UnivariateSpline
 from scipy.stats import norm
-from sklearn.ensemble import RandomForestClassifier # NEW: For ML Model
-from sklearn.model_selection import train_test_split # NEW: For ML Model
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
 
 # --- APP CONFIGURATION ---
 st.set_page_config(layout="wide", page_title="Market Terminal Pro", page_icon="📈")
@@ -51,9 +51,19 @@ def get_api_key(key_name):
     if key_name in st.secrets: return st.secrets[key_name]
     return None
 
-# --- NEW: GAMMA EXPOSURE (GEX) ENGINE ---
+def flatten_dataframe(df):
+    """Robust flattening of MultiIndex columns from yfinance"""
+    if df.empty: return df
+    df = df.copy()
+    # If MultiIndex (e.g., Price, Ticker), drop the Ticker level
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    # Remove duplicates if any exist (e.g. two Volume columns)
+    df = df.loc[:, ~df.columns.duplicated()]
+    return df
+
+# --- 1. NEW: GAMMA EXPOSURE (GEX) ENGINE ---
 def calculate_black_scholes_gamma(S, K, T, r, sigma):
-    """Calculates Gamma for a single option"""
     if T <= 0 or sigma <= 0: return 0
     d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
     gamma = norm.pdf(d1) / (S * sigma * np.sqrt(T))
@@ -61,146 +71,124 @@ def calculate_black_scholes_gamma(S, K, T, r, sigma):
 
 @st.cache_data(ttl=3600)
 def get_gex_profile(opt_ticker, spot_price):
-    """Calculates Net Gamma Exposure per Strike"""
     try:
         tk = yf.Ticker(opt_ticker)
         exps = tk.options
         if len(exps) < 2: return None
-        target_exp = exps[1] # Next monthly expiry
+        target_exp = exps[1]
         
-        # Get Chain
         chain = tk.option_chain(target_exp)
-        calls = chain.calls
-        puts = chain.puts
-        
-        # Risk Free Rate (Approx 4.5%)
+        calls, puts = chain.calls, chain.puts
         r = 0.045
-        # Time to Expiry (Annualized)
         exp_date = datetime.strptime(target_exp, "%Y-%m-%d")
         T = (exp_date - datetime.now()).days / 365.0
         
         gex_data = []
-        
-        # Process Calls (Positive Gamma for Dealers if they are Short Calls -> Long Gamma? 
-        # Convention: Dealers are Short Calls (Long Gamma) and Short Puts (Short Gamma)
-        # Simplified: Call OI * Gamma = Positive GEX, Put OI * Gamma = Negative GEX)
-        
-        # Merge strikes
         strikes = sorted(list(set(calls['strike'].tolist() + puts['strike'].tolist())))
         
         for K in strikes:
-            # Call Data
             c_row = calls[calls['strike'] == K]
             c_oi = c_row['openInterest'].iloc[0] if not c_row.empty else 0
             c_iv = c_row['impliedVolatility'].iloc[0] if not c_row.empty and 'impliedVolatility' in c_row.columns else 0.2
             
-            # Put Data
             p_row = puts[puts['strike'] == K]
             p_oi = p_row['openInterest'].iloc[0] if not p_row.empty else 0
             p_iv = p_row['impliedVolatility'].iloc[0] if not p_row.empty and 'impliedVolatility' in p_row.columns else 0.2
             
-            # Calculate Gammas
             c_gamma = calculate_black_scholes_gamma(spot_price, K, T, r, c_iv)
             p_gamma = calculate_black_scholes_gamma(spot_price, K, T, r, p_iv)
             
-            # Net GEX (Notional)
-            # Spot * Gamma * OI * 100
             net_gex = (c_gamma * c_oi - p_gamma * p_oi) * spot_price * 100
-            
             gex_data.append({"strike": K, "gex": net_gex})
             
         return pd.DataFrame(gex_data)
-    except Exception as e:
-        return None
+    except: return None
 
-# --- NEW: VOLUME PROFILE ENGINE ---
+# --- 2. NEW: VOLUME PROFILE ENGINE (FIXED) ---
 def calculate_volume_profile(df, bins=50):
-    """Calculates Volume by Price Zone"""
+    """Calculates Volume by Price Zone with Strict Flattening"""
     if df.empty: return None, None, None
     
+    # --- FIX: Ensure strict single-level columns ---
+    df = flatten_dataframe(df)
+    
+    # Validate required columns exist
+    req_cols = ['High', 'Low', 'Close', 'Volume']
+    if not all(col in df.columns for col in req_cols):
+        return None, None, None
+
     price_range = df['High'].max() - df['Low'].min()
+    if price_range == 0: return None, None, None
+    
     bin_size = price_range / bins
     
-    # Create bins
+    # Calculation
     df['PriceBin'] = ((df['Close'] - df['Low'].min()) // bin_size).astype(int)
+    
+    # Grouping
     vol_profile = df.groupby('PriceBin')['Volume'].sum().reset_index()
     
     # Map back to Price
     vol_profile['PriceLevel'] = df['Low'].min() + (vol_profile['PriceBin'] * bin_size)
     
-    # POC (Point of Control)
+    # POC
     poc_idx = vol_profile['Volume'].idxmax()
     poc_price = vol_profile.loc[poc_idx, 'PriceLevel']
     
     # Value Area (70%)
     total_vol = vol_profile['Volume'].sum()
-    vol_profile = vol_profile.sort_values('Volume', ascending=False)
+    vol_profile = vol_profile.sort_values('Volume', ascending=False) # This is where it failed previously
     vol_profile['CumVol'] = vol_profile['Volume'].cumsum()
     vol_profile['InVA'] = vol_profile['CumVol'] <= (total_vol * 0.70)
     
-    # Re-sort by price for plotting
     vol_profile = vol_profile.sort_values('PriceLevel')
     
     return vol_profile, poc_price, bin_size
 
-# --- NEW: MACHINE LEARNING ENGINE ---
+# --- 3. NEW: MACHINE LEARNING ENGINE ---
 @st.cache_data(ttl=3600)
 def get_ml_prediction(ticker):
-    """Trains a Lite Random Forest to predict Next Day Up/Down"""
     try:
-        # Get longer history for training
-        df = yf.download(ticker, period="5y", interval="1d", progress=False)
+        df = yf.download(ticker, period="2y", interval="1d", progress=False)
         if df.empty: return None
         
-        # Handle MultiIndex
-        if isinstance(df.columns, pd.MultiIndex):
-            df = df.droplevel(1, axis=1) # Flatten
+        df = flatten_dataframe(df) # Fix MultiIndex
         
         data = df.copy()
         data['Returns'] = data['Close'].pct_change()
-        data['Target'] = (data['Close'].shift(-1) > data['Close']).astype(int) # 1 if next day up
+        data['Target'] = (data['Close'].shift(-1) > data['Close']).astype(int)
         
-        # Features
         data['RSI'] = calculate_rsi(data['Close'])
         data['Vol_5d'] = data['Returns'].rolling(5).std()
         data['Mom_5d'] = data['Close'].pct_change(5)
         data['DayOfWeek'] = data.index.dayofweek
         
         data = data.dropna()
+        if len(data) < 50: return 0.5
         
-        # Features & Target
         features = ['RSI', 'Vol_5d', 'Mom_5d', 'DayOfWeek']
         X = data[features]
         y = data['Target']
         
-        # Train/Test (Last 20% is test, but we train on all for 'Tomorrow' prediction)
-        model = RandomForestClassifier(n_estimators=100, max_depth=5, random_state=42)
+        model = RandomForestClassifier(n_estimators=100, max_depth=3, random_state=42)
         model.fit(X, y)
         
-        # Predict Tomorrow
         last_row = X.iloc[[-1]]
-        prob_up = model.predict_proba(last_row)[0][1] # Probability of Class 1 (Up)
-        
+        prob_up = model.predict_proba(last_row)[0][1]
         return prob_up
-    except Exception as e:
-        return 0.5
+    except: return 0.5
 
-# --- NEW: KELLY CRITERION ENGINE ---
+# --- 4. NEW: KELLY CRITERION ---
 def calculate_kelly(prob_win, risk_reward_ratio):
-    """Kelly Formula: f* = p - q/b"""
     p = prob_win
     q = 1 - p
     b = risk_reward_ratio
-    
     if b == 0: return 0
     f = p - (q / b)
-    return max(0, f) # No negative sizing
+    return max(0, f)
 
-# --- EXISTING ENGINES (Preserved) ---
-# ... (parse_eco_value, analyze_event_impact, get_daily_data, get_intraday_data, get_news, get_economic_calendar, get_macro_regime_data, calculate_volatility_permission, get_options_pdf, get_seasonality_stats, calculate_vwap, calculate_rsi, get_correlation_data, get_ai_sentiment, generate_monte_carlo)
-# Re-pasting the essential ones needed for context:
-
-def calculate_rsi(series, period=14): # Helper for ML
+# --- EXISTING ENGINES (Optimized) ---
+def calculate_rsi(series, period=14):
     delta = series.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
@@ -209,16 +197,12 @@ def calculate_rsi(series, period=14): # Helper for ML
 
 @st.cache_data(ttl=60)
 def get_daily_data(ticker):
-    try:
-        data = yf.download(ticker, period="10y", interval="1d", progress=False)
-        return data
+    try: return yf.download(ticker, period="2y", interval="1d", progress=False)
     except: return pd.DataFrame()
 
 @st.cache_data(ttl=60)
 def get_intraday_data(ticker):
-    try:
-        data = yf.download(ticker, period="5d", interval="15m", progress=False)
-        return data
+    try: return yf.download(ticker, period="5d", interval="15m", progress=False)
     except: return pd.DataFrame()
 
 @st.cache_data(ttl=86400)
@@ -238,23 +222,22 @@ def calculate_volatility_permission(ticker):
     try:
         df = yf.download(ticker, period="1y", interval="1d", progress=False)
         if df.empty: return None
-        if isinstance(df.columns, pd.MultiIndex):
-            high, low, close = df['High'].iloc[:, 0], df['Low'].iloc[:, 0], df['Close'].iloc[:, 0]
-        else:
-            high, low, close = df['High'], df['Low'], df['Close']
+        df = flatten_dataframe(df) # Fix MultiIndex
+        
+        high, low, close = df['High'], df['Low'], df['Close']
         prev_close = close.shift(1)
         tr = pd.concat([high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
         tr_pct = (tr / close) * 100
         tr_pct = tr_pct.dropna()
+        
         log_tr = np.log(tr_pct)
-        forecast_log = log_tr.ewm(alpha=0.94).mean().iloc[-1]
-        forecast_tr = np.exp(forecast_log)
+        forecast = np.exp(log_tr.ewm(alpha=0.94).mean().iloc[-1])
         baseline = tr_pct.rolling(20).mean().iloc[-1]
-        return {"forecast": forecast_tr, "baseline": baseline, "is_go": forecast_tr > baseline, "history": tr_pct, "signal": "TRADE PERMITTED" if forecast_tr > baseline else "CAUTION"}
+        return {"forecast": forecast, "baseline": baseline, "is_go": forecast > baseline, "history": tr_pct, "signal": "TRADE PERMITTED" if forecast > baseline else "CAUTION"}
     except: return None
 
 @st.cache_data(ttl=3600)
-def get_options_pdf(opt_ticker): # Needed for GEX Spot Reference
+def get_options_pdf(opt_ticker):
     try:
         tk = yf.Ticker(opt_ticker)
         exps = tk.options
@@ -290,15 +273,19 @@ st.title(f"📊 {selected_asset} Quantitative Terminal")
 # Fetch Data
 daily_data = get_daily_data(asset_info['ticker'])
 intraday_data = get_intraday_data(asset_info['ticker'])
+
+# Handle flattening globally for display
+if not daily_data.empty: daily_data = flatten_dataframe(daily_data)
+if not intraday_data.empty: intraday_data = flatten_dataframe(intraday_data)
+
 macro_regime = get_macro_regime_data(fred_key)
 vol_forecast = calculate_volatility_permission(asset_info['ticker'])
-options_data = get_options_pdf(asset_info['opt_ticker']) # Also serves as probability
+options_data = get_options_pdf(asset_info['opt_ticker'])
 ml_prob = get_ml_prediction(asset_info['ticker'])
 
 # --- 1. OVERVIEW & ML PREDICTOR ---
 if not daily_data.empty:
-    if isinstance(daily_data.columns, pd.MultiIndex): close = daily_data['Close'].iloc[:, 0]
-    else: close = daily_data['Close']
+    close = daily_data['Close']
     curr = close.iloc[-1]
     pct = ((curr - close.iloc[-2]) / close.iloc[-2]) * 100
     
@@ -308,7 +295,7 @@ if not daily_data.empty:
     # ML Widget
     if ml_prob:
         bias = "BULLISH" if ml_prob > 0.55 else "BEARISH" if ml_prob < 0.45 else "NEUTRAL"
-        conf = abs(ml_prob - 0.5) * 200 # Scale 0.5-1.0 to 0-100% confidence
+        conf = abs(ml_prob - 0.5) * 200 
         color = "bullish" if bias == "BULLISH" else "bearish" if bias == "BEARISH" else "neutral"
         c2.markdown(f"""
         <div class="metric-container">
@@ -320,10 +307,8 @@ if not daily_data.empty:
     
     # Kelly Widget
     if vol_forecast and ml_prob:
-        # Heuristic Risk/Reward based on Volatility State (High Vol = Lower R/R assumption for safety)
         rr_ratio = 1.5 if vol_forecast['is_go'] else 1.0 
         kelly_pct = calculate_kelly(ml_prob, rr_ratio) * 100
-        # Fractional Kelly (Half-Kelly for safety)
         safe_kelly = kelly_pct * 0.5 
         c3.metric("Kelly Size (Risk)", f"{safe_kelly:.1f}%", f"Win Prob: {ml_prob*100:.0f}%")
 
@@ -337,83 +322,56 @@ if not daily_data.empty:
         </div>
         """, unsafe_allow_html=True)
 
-    # --- CHART WITH VOLUME PROFILE (NEW) ---
+    # --- CHART WITH VOLUME PROFILE ---
     st.markdown("---")
     st.subheader("Price & Volume Architecture")
     
     chart_col, vol_col = st.columns([3, 1])
     
     with chart_col:
-        # Standard Candle Chart
-        fig = go.Figure(data=[go.Candlestick(x=daily_data.index, open=daily_data['Open'].iloc[:,0] if isinstance(daily_data.columns, pd.MultiIndex) else daily_data['Open'], 
-                                            high=daily_data['High'].iloc[:,0] if isinstance(daily_data.columns, pd.MultiIndex) else daily_data['High'], 
-                                            low=daily_data['Low'].iloc[:,0] if isinstance(daily_data.columns, pd.MultiIndex) else daily_data['Low'], 
-                                            close=close, name='Price')])
+        fig = go.Figure(data=[go.Candlestick(x=daily_data.index, open=daily_data['Open'], high=daily_data['High'], low=daily_data['Low'], close=daily_data['Close'], name='Price')])
         fig.update_layout(height=400, template="plotly_dark", xaxis_rangeslider_visible=False, margin=dict(l=0, r=0, t=0, b=0))
         st.plotly_chart(fig, use_container_width=True)
         
     with vol_col:
-        # Volume Profile Chart
+        # Pass flattened data
         vp_data, poc, _ = calculate_volume_profile(intraday_data if not intraday_data.empty else daily_data.tail(30))
         if vp_data is not None:
             fig_vp = go.Figure()
-            # Gray for Value Area, Dark Gray for outside
             colors = ['#00ff00' if x else '#333333' for x in vp_data['InVA']]
-            
-            fig_vp.add_trace(go.Bar(
-                y=vp_data['PriceLevel'], 
-                x=vp_data['Volume'], 
-                orientation='h',
-                marker_color=colors,
-                opacity=0.6,
-                name="Vol Profile"
-            ))
-            # POC Line
+            fig_vp.add_trace(go.Bar(y=vp_data['PriceLevel'], x=vp_data['Volume'], orientation='h', marker_color=colors, opacity=0.6, name="Vol Profile"))
             fig_vp.add_hline(y=poc, line_dash="dash", line_color="yellow", annotation_text="POC")
-            
-            fig_vp.update_layout(
-                title="Volume Profile", 
-                template="plotly_dark", 
-                height=400, 
-                showlegend=False,
-                xaxis_visible=False,
-                margin=dict(l=0, r=0, t=30, b=0)
-            )
+            fig_vp.update_layout(title="Volume Profile", template="plotly_dark", height=400, showlegend=False, xaxis_visible=False, margin=dict(l=0, r=0, t=30, b=0))
             st.plotly_chart(fig_vp, use_container_width=True)
+            st.info(" The yellow dashed line is the POC (Point of Control) - the price level with the highest volume.")
 
 # --- 2. GAMMA EXPOSURE (GEX) ---
 st.markdown("---")
 st.subheader("☢️ Gamma Exposure (Dealer Positioning)")
 if options_data:
-    # We use the ETF ticker (SPY/QQQ) spot price for GEX calc
-    spot_ref = yf.Ticker(asset_info['opt_ticker']).history(period='1d')['Close'].iloc[-1]
-    gex_df = get_gex_profile(asset_info['opt_ticker'], spot_ref)
-    
-    if gex_df is not None:
-        g1, g2 = st.columns([3, 1])
-        with g1:
-            # Filter near-the-money strikes for cleaner chart
-            center_idx = (gex_df['strike'] - spot_ref).abs().argsort()[:20]
-            gex_zoom = gex_df.iloc[center_idx].sort_values('strike')
-            
-            fig_gex = go.Figure()
-            fig_gex.add_trace(go.Bar(
-                x=gex_zoom['strike'], 
-                y=gex_zoom['gex'],
-                marker_color=['#00ff00' if x > 0 else '#ff4b4b' for x in gex_zoom['gex']],
-                name='Net GEX'
-            ))
-            fig_gex.add_vline(x=spot_ref, line_dash="dot", annotation_text="Spot")
-            fig_gex.update_layout(title="Net Gamma by Strike (Sticky vs Slippery)", template="plotly_dark", height=300, yaxis_title="Gamma Notional ($)")
-            st.plotly_chart(fig_gex, use_container_width=True)
-            
-        with g2:
-            total_gex = gex_df['gex'].sum()
-            sentiment = "High Volatility (Slippery)" if total_gex < 0 else "Low Volatility (Sticky)"
-            st.metric("Total Net Gamma", f"${total_gex/1000000:.0f}M", sentiment)
-            st.info(" Green bars act as magnets (dealers buy dips). Red bars act as accelerators (dealers sell dips).")
+    # Use ETF ticker history for spot ref
+    spot_hist = yf.Ticker(asset_info['opt_ticker']).history(period='1d')
+    if not spot_hist.empty:
+        spot_ref = spot_hist['Close'].iloc[-1]
+        gex_df = get_gex_profile(asset_info['opt_ticker'], spot_ref)
+        
+        if gex_df is not None:
+            g1, g2 = st.columns([3, 1])
+            with g1:
+                center_idx = (gex_df['strike'] - spot_ref).abs().argsort()[:20]
+                gex_zoom = gex_df.iloc[center_idx].sort_values('strike')
+                fig_gex = go.Figure()
+                fig_gex.add_trace(go.Bar(x=gex_zoom['strike'], y=gex_zoom['gex'], marker_color=['#00ff00' if x > 0 else '#ff4b4b' for x in gex_zoom['gex']], name='Net GEX'))
+                fig_gex.add_vline(x=spot_ref, line_dash="dot", annotation_text="Spot")
+                fig_gex.update_layout(title="Net Gamma by Strike (Sticky vs Slippery)", template="plotly_dark", height=300, yaxis_title="Gamma Notional ($)")
+                st.plotly_chart(fig_gex, use_container_width=True)
+            with g2:
+                total_gex = gex_df['gex'].sum()
+                sentiment = "High Volatility (Slippery)" if total_gex < 0 else "Low Volatility (Sticky)"
+                st.metric("Total Net Gamma", f"${total_gex/1000000:.0f}M", sentiment)
+                st.info(" Green bars indicate dealers are long gamma (suppressing volatility). Red bars indicate dealers are short gamma (amplifying volatility).")
 
-# --- 3. VOLATILITY & INTRADAY ---
+# --- 3. VOLATILITY REGIME ---
 st.markdown("---")
 st.subheader("⚡ Volatility Regime")
 if vol_forecast:
@@ -424,7 +382,6 @@ if vol_forecast:
         st.markdown(f"Exp TR: **{vol_forecast['forecast']:.2f}%**")
     with v2:
         hist_tr = vol_forecast['history'].tail(40)
-        hist_base = vol_forecast['signal'] # logic handled in chart
         fig_vol = go.Figure()
         fig_vol.add_trace(go.Bar(x=hist_tr.index, y=hist_tr.values, marker_color='#333', name='Realized'))
         next_day = hist_tr.index[-1] + timedelta(days=1)
@@ -432,19 +389,16 @@ if vol_forecast:
         fig_vol.update_layout(height=200, template="plotly_dark", margin=dict(t=10, b=10))
         st.plotly_chart(fig_vol, use_container_width=True)
 
-# --- 4. CONCLUSION ---
+# --- 4. EXECUTIVE SUMMARY ---
 st.markdown("---")
 st.subheader("🏁 Executive Summary")
-
 bias_score = 0
 reasons = []
 
 if ml_prob > 0.55: bias_score += 1; reasons.append(f"AI Model predicts UP ({ml_prob:.0%})")
 elif ml_prob < 0.45: bias_score -= 1; reasons.append(f"AI Model predicts DOWN ({ml_prob:.0%})")
-
 if macro_regime and macro_regime['bias'] == "BULLISH": bias_score += 1; reasons.append("Real Rates are Negative (Supportive)")
 elif macro_regime: bias_score -= 1; reasons.append("Real Rates are Positive (Restrictive)")
-
 if options_data and options_data['peak'] > curr: bias_score += 1; reasons.append("Options Skew is Bullish")
 elif options_data: bias_score -= 1; reasons.append("Options Skew is Bearish")
 
