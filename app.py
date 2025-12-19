@@ -10,8 +10,15 @@ from datetime import datetime, timedelta
 from scipy.stats import norm
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.mixture import GaussianMixture
-import nltk
-from nltk.sentiment.vader import SentimentIntensityAnalyzer
+
+# --- SAFE IMPORT FOR NLTK ---
+# This prevents the app from crashing if NLTK is not installed
+try:
+    import nltk
+    from nltk.sentiment.vader import SentimentIntensityAnalyzer
+    NLTK_AVAILABLE = True
+except ImportError:
+    NLTK_AVAILABLE = False
 
 # --- APP CONFIGURATION ---
 st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V4 (Inst. Grade)", page_icon="💹")
@@ -59,14 +66,15 @@ ASSETS = {
     "EUR/USD": {"ticker": "EURUSD=X", "opt_ticker": None}
 }
 
-# --- NLTK SETUP ---
+# --- NLTK SETUP (Resilient) ---
 @st.cache_resource
-def download_nltk():
-    try:
-        nltk.download('vader_lexicon', quiet=True)
-    except: pass
+def download_nltk_data():
+    if NLTK_AVAILABLE:
+        try:
+            nltk.download('vader_lexicon', quiet=True)
+        except: pass
 
-download_nltk()
+download_nltk_data()
 
 # --- HELPER FUNCTIONS ---
 
@@ -142,11 +150,10 @@ def calculate_greeks(S, K, T, r, sigma, opt_type):
     d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
     d2 = d1 - sigma * np.sqrt(T)
     
-    # Gamma: Change in Delta per $1 move in underlying
+    # Gamma
     gamma = norm.pdf(d1) / (S * sigma * np.sqrt(T))
     
-    # Vanna: Change in Delta per 1% change in Vol (dDelta/dSigma)
-    # Formula: -d2/sigma * N'(d1) or similar. Using standard approx.
+    # Vanna
     vanna = -norm.pdf(d1) * d2 / sigma
     
     return gamma, vanna
@@ -156,7 +163,11 @@ def get_institutional_greeks(opt_ticker):
     if not opt_ticker: return None, None, None
     try:
         tk = yf.Ticker(opt_ticker)
-        spot = tk.history(period="1d")['Close'].iloc[-1]
+        
+        # Safe history check
+        hist = tk.history(period="1d")
+        if hist.empty: return None, None, None
+        spot = hist['Close'].iloc[-1]
         
         exps = tk.options
         if len(exps) < 2: return None, None, None
@@ -189,20 +200,9 @@ def get_institutional_greeks(opt_ticker):
             c_gamma, c_vanna = calculate_greeks(spot, K, T, r, c_iv, 'call')
             p_gamma, p_vanna = calculate_greeks(spot, K, T, r, p_iv, 'put')
             
-            # Net Exposure (Dealer Perspective: Dealers are usually Short Options)
-            # If Dealers are Short Calls: They are Short Gamma, Short Vanna
-            # If Dealers are Short Puts: They are Short Gamma, Long Vanna (Complex, simplified here as standard GEX)
-            # Standard GEX Assumption: Dealers take opposite side of OI.
-            # Customer Long Call -> Dealer Short Call (Neg Gamma)
-            # Customer Long Put -> Dealer Short Put (Neg Gamma - wait, Put Gamma is positive)
-            # Let's use the standard "GEX = Call Gamma * OI - Put Gamma * OI" (Market Maker Model)
-            
+            # Net Exposure
             net_gamma = (c_gamma * c_oi - p_gamma * p_oi) * spot * 100
-            
-            # Vanna: Delta change for 1% vol change
-            # Call Vanna is typically positive OTM? Check signs. 
-            # We will just sum weighted vannas.
-            net_vanna = (c_vanna * c_oi - p_vanna * p_oi) * 1000 # Scaled for visibility
+            net_vanna = (c_vanna * c_oi - p_vanna * p_oi) * 1000 
             
             greeks_data.append({"strike": K, "gamma": net_gamma, "vanna": net_vanna})
             
@@ -220,8 +220,7 @@ def calculate_vrp(daily_df):
         df['log_ret'] = np.log(df['Close'] / df['Close'].shift(1))
         df['rv'] = df['log_ret'].rolling(20).std() * np.sqrt(252) * 100
         
-        # Implied Vol Proxy (Parkinson Vol or Range Vol as proxy if IV missing)
-        # Using Range Volatility as a proxy for "Pricing"
+        # Implied Vol Proxy (Range Volatility)
         df['range_vol'] = (np.log(df['High'] / df['Low'])).rolling(20).mean() * np.sqrt(252) * 100 * 1.5
         
         curr_rv = df['rv'].iloc[-1]
@@ -250,6 +249,15 @@ def detect_dark_pools(intraday_df):
 @st.cache_data(ttl=3600)
 def get_smart_news(api_key, query="Finance"):
     if not api_key: return []
+    # If NLTK failed to import, return basic news without sentiment scores
+    if not NLTK_AVAILABLE:
+        try:
+            newsapi = NewsApiClient(api_key=api_key)
+            articles = newsapi.get_top_headlines(category='business', language='en', country='us')['articles'][:5]
+            return [{**art, "sentiment": "N/A", "score": 0, "color": "gray"} for art in articles]
+        except: return []
+
+    # If NLTK works, run sentiment analysis
     try:
         newsapi = NewsApiClient(api_key=api_key)
         articles = newsapi.get_top_headlines(category='business', language='en', country='us')['articles'][:5]
@@ -268,9 +276,11 @@ def get_smart_news(api_key, query="Finance"):
 # --- 5. DATA FETCHERS ---
 @st.cache_data(ttl=60)
 def get_data(ticker):
-    daily = flatten_dataframe(yf.download(ticker, period="1y", interval="1d", progress=False))
-    intraday = flatten_dataframe(yf.download(ticker, period="5d", interval="15m", progress=False))
-    return daily, intraday
+    try:
+        daily = flatten_dataframe(yf.download(ticker, period="1y", interval="1d", progress=False))
+        intraday = flatten_dataframe(yf.download(ticker, period="5d", interval="15m", progress=False))
+        return daily, intraday
+    except: return pd.DataFrame(), pd.DataFrame()
 
 def terminal_chart_layout(fig, title="", height=350):
     fig.update_layout(
@@ -292,6 +302,9 @@ with st.sidebar:
     rapid_key = get_api_key("rapidapi_key")
     
     st.info("Institutional Modules Loaded:\n- GEX/Vanna Surface\n- Dark Pool Scanner\n- VRP Calculator\n- NLP Sentiment")
+    if not NLTK_AVAILABLE:
+        st.warning("⚠️ NLTK not found. Sentiment disabled. Add 'nltk' to requirements.txt")
+        
     if st.button("HARD REFRESH"): st.cache_data.clear()
 
 # --- MAIN DASHBOARD ---
@@ -308,7 +321,8 @@ news_data = get_smart_news(news_key)
 # --- 1. HEADS UP DISPLAY (HUD) ---
 if not daily_df.empty:
     curr = daily_df['Close'].iloc[-1]
-    pct = (curr / daily_df['Close'].iloc[-2] - 1) * 100
+    prev = daily_df['Close'].iloc[-2]
+    pct = (curr / prev - 1) * 100
     
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("PRICE", f"{curr:,.2f}", f"{pct:.2f}%")
@@ -332,10 +346,6 @@ if not daily_df.empty:
 if not daily_df.empty:
     st.markdown("### 👁️ INSTITUTIONAL ORDER FLOW")
     
-    # We use Daily for the main trend, but let's visualize Intraday for Dark Pools if relevant
-    # Or plot Daily Candle with markers. Let's do Daily Candle with overlaid Whales from recent days?
-    # Better: Plot Intraday (Last 5 days) to show the specific Whale Bars.
-    
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.7, 0.3])
     
     # Candle Chart (Intraday)
@@ -357,7 +367,6 @@ st.markdown("### 🏦 DEALER POSITIONING (GEX & VANNA)")
 if greeks_df is not None:
     g1, g2 = st.columns(2)
     
-    # Filter for zoom
     center = greeks_spot
     zoom_df = greeks_df[(greeks_df['strike'] > center * 0.9) & (greeks_df['strike'] < center * 1.1)]
     
@@ -383,7 +392,10 @@ if greeks_df is not None:
     st.caption("*Positive Vanna (Blue) implies dealers buy Delta as Vol rises. Negative Vanna (Pink) implies dealers sell Delta as Vol rises.*")
 
 else:
-    st.warning("Options Data Unavailable for this asset.")
+    if asset_info['opt_ticker'] is None:
+         st.info("Options data unavailable for this asset class (Crypto/FX).")
+    else:
+         st.warning("Options Data Unavailable or Market Closed.")
 
 # --- 4. NEWS & SENTIMENT ---
 st.markdown("---")
@@ -395,7 +407,7 @@ with n1:
         for item in news_data:
             st.markdown(f"""
             <div style='border-left: 3px solid {item['color']}; padding-left: 10px; margin-bottom: 10px;'>
-                <a href='{item['url']}' style='color: white; text-decoration: none; font-weight: bold;'>{item['title']}</a>
+                <a href='{item['url']}' target='_blank' style='color: white; text-decoration: none; font-weight: bold;'>{item['title']}</a>
                 <div style='font-size: 0.8em; color: gray; display: flex; justify-content: space-between;'>
                     <span>{item['source']}</span>
                     <span style='color:{item['color']}'>{item['sentiment']} ({item['score']})</span>
@@ -403,13 +415,13 @@ with n1:
             </div>
             """, unsafe_allow_html=True)
     else:
-        st.info("No news feed active.")
+        st.info("No news feed active or API Key missing.")
 
 with n2:
     st.markdown("### ⚡ RISK SUMMARY")
     if vrp_data:
         st.markdown(f"**VRP STATUS:** <span class='{vrp_data['color']}'>{vrp_data['status']}</span>", unsafe_allow_html=True)
-        st.progress(max(0, min(100, 50 + vrp_data['vrp']*10)))
+        st.progress(max(0, min(100, int(50 + vrp_data['vrp']*10))))
         st.caption("Lower = Buy Options (Long Vol) | Higher = Sell Options (Short Vol)")
         
     st.markdown("---")
