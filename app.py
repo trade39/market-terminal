@@ -14,7 +14,7 @@ from scipy.stats import norm
 # --- APP CONFIGURATION ---
 st.set_page_config(layout="wide", page_title="Market Terminal Pro", page_icon="📈")
 
-# Custom CSS (Merged for both styles)
+# Custom CSS
 st.markdown("""
 <style>
     .stApp { background-color: #0e1117; }
@@ -26,20 +26,19 @@ st.markdown("""
     .bearish { color: #ff4b4b; font-weight: bold; background-color: rgba(255, 75, 75, 0.1); padding: 2px 8px; border-radius: 4px; }
     .neutral { color: #cccccc; font-weight: bold; background-color: rgba(200, 200, 200, 0.1); padding: 2px 8px; border-radius: 4px; }
     
-    /* New Volatility Badges */
+    /* Volatility Badges */
     .vol-go { background-color: rgba(0, 255, 0, 0.2); color: #00ff00; padding: 4px 10px; border-radius: 4px; font-weight: bold; border: 1px solid #00ff00; }
     .vol-stop { background-color: rgba(255, 75, 75, 0.2); color: #ff4b4b; padding: 4px 10px; border-radius: 4px; font-weight: bold; border: 1px solid #ff4b4b; }
 </style>
 """, unsafe_allow_html=True)
 
-# --- CONSTANTS & MAPPINGS (Updated for Options) ---
-# Added 'opt_ticker' because indices (like ^GSPC) often don't have free option chains in yfinance, so we use the ETF proxy (SPY).
+# --- CONSTANTS & MAPPINGS ---
 ASSETS = {
-    "S&P 500": {"ticker": "^GSPC", "opt_ticker": "SPY", "news_query": "S&P 500", "fred_series": "WALCL", "fred_label": "Fed Bal Sheet"},
-    "NASDAQ": {"ticker": "^IXIC", "opt_ticker": "QQQ", "news_query": "Nasdaq", "fred_series": "FEDFUNDS", "fred_label": "Fed Funds Rate"},
-    "Gold (Comex)": {"ticker": "GC=F", "opt_ticker": "GLD", "news_query": "Gold Price", "fred_series": "DGS10", "fred_label": "10Y Yield"},
-    "EUR/USD": {"ticker": "EURUSD=X", "opt_ticker": "FXE", "news_query": "EURUSD", "fred_series": "DEXUSEU", "fred_label": "Exch Rate"},
-    "NVIDIA": {"ticker": "NVDA", "opt_ticker": "NVDA", "news_query": "Nvidia Stock", "fred_series": "DGS10", "fred_label": "Yields"}
+    "S&P 500": {"ticker": "^GSPC", "opt_ticker": "SPY", "news_query": "S&P 500"},
+    "NASDAQ": {"ticker": "^IXIC", "opt_ticker": "QQQ", "news_query": "Nasdaq"},
+    "Gold (Comex)": {"ticker": "GC=F", "opt_ticker": "GLD", "news_query": "Gold Price"},
+    "EUR/USD": {"ticker": "EURUSD=X", "opt_ticker": "FXE", "news_query": "EURUSD"},
+    "NVIDIA": {"ticker": "NVDA", "opt_ticker": "NVDA", "news_query": "Nvidia Stock"}
 }
 
 DXY_TICKER = "DX-Y.NYB"
@@ -47,13 +46,15 @@ DXY_TICKER = "DX-Y.NYB"
 # --- HELPER FUNCTIONS ---
 
 def get_api_key(key_name):
+    """Retrieve API keys from secrets.toml"""
     if "api_keys" in st.secrets and key_name in st.secrets["api_keys"]:
         return st.secrets["api_keys"][key_name]
     if key_name in st.secrets:
         return st.secrets[key_name]
     return None
 
-# [PRESERVED] Daily Data
+# --- DATA FETCHING ---
+
 @st.cache_data(ttl=60)
 def get_daily_data(ticker):
     try:
@@ -62,7 +63,6 @@ def get_daily_data(ticker):
     except Exception:
         return pd.DataFrame()
 
-# [PRESERVED] Intraday Data
 @st.cache_data(ttl=60)
 def get_intraday_data(ticker):
     try:
@@ -71,7 +71,6 @@ def get_intraday_data(ticker):
     except Exception:
         return pd.DataFrame()
 
-# [PRESERVED] News
 @st.cache_data(ttl=300)
 def get_news(api_key, query):
     if not api_key: return None
@@ -83,30 +82,36 @@ def get_news(api_key, query):
     except Exception as e:
         return f"Error: {str(e)}"
 
-# [NEW] Enhanced Macro Regime (Real Rates)
+# --- INSTITUTIONAL ALGORITHMS ---
+
 @st.cache_data(ttl=86400)
 def get_macro_regime_data(api_key):
-    """Fetches Fed Funds and CPI to calculate Real Rates Regime"""
+    """
+    CONCEPT: Macro Regime via Real Rates
+    Logic: Fed Funds Rate (Cost) vs CPI (Inflation).
+    """
     if not api_key: return None
     try:
         fred = Fred(api_key=api_key)
-        # 1. Fed Funds Rate (Cost of Money)
+        # 1. Fed Funds Rate
         ffr = fred.get_series('FEDFUNDS').iloc[-1]
-        # 2. CPI YoY (Inflation)
+        # 2. CPI YoY
         cpi_series = fred.get_series('CPIAUCSL').pct_change(12) * 100
         cpi = cpi_series.iloc[-1]
         
         real_rate = ffr - cpi
-        bias = "BULLISH" if real_rate < 0.5 else "BEARISH" # Simple threshold logic
+        bias = "BULLISH" if real_rate < 0.5 else "BEARISH" # Threshold for risk-on
         
         return {"ffr": ffr, "cpi": cpi, "real_rate": real_rate, "bias": bias}
     except Exception:
         return None
 
-# [NEW] GARCH-Style Volatility Forecast
 @st.cache_data(ttl=300)
 def calculate_volatility_permission(ticker):
-    """Calculates Log-TR GARCH Forecast for Trade Permission"""
+    """
+    CONCEPT: GARCH-style Volatility Forecasting
+    Logic: Log-True Range EWMA vs Baseline
+    """
     try:
         df = yf.download(ticker, period="1y", interval="1d", progress=False)
         if df.empty: return None
@@ -125,56 +130,64 @@ def calculate_volatility_permission(ticker):
         
         # Log Transform & EWMA (GARCH Proxy)
         log_tr = np.log(tr_pct)
+        # alpha=0.94 simulates volatility persistence
         forecast_log = log_tr.ewm(alpha=0.94).mean().iloc[-1]
         forecast_tr = np.exp(forecast_log)
         
         # Baseline (20d MA)
-        baseline = tr_pct.rolling(20).mean().iloc[-1]
+        baseline_series = tr_pct.rolling(20).mean()
+        baseline = baseline_series.iloc[-1]
         
         return {
             "forecast": forecast_tr,
             "baseline": baseline,
             "signal": "TRADE PERMITTED" if forecast_tr > baseline else "NO TRADE / CAUTION",
-            "is_go": forecast_tr > baseline
+            "is_go": forecast_tr > baseline,
+            "history": tr_pct,
+            "baseline_history": baseline_series
         }
     except: return None
 
-# [NEW] Options Probability (Breeden-Litzenberger)
 @st.cache_data(ttl=3600)
 def get_options_pdf(opt_ticker):
-    """Extracts Probability Density Function from Option Chain"""
+    """
+    CONCEPT: Options-Implied Probability (Breeden-Litzenberger)
+    Logic: 2nd Derivative of Call Prices = PDF
+    """
     try:
         tk = yf.Ticker(opt_ticker)
         exps = tk.options
         if len(exps) < 2: return None
-        target_exp = exps[1] # Skip 0DTE, look at next expiry
+        target_exp = exps[1] # Use next monthly expiry usually
         
         chain = tk.option_chain(target_exp)
         calls = chain.calls
         
-        # Filter and Midpoint
+        # Filter for liquidity
         calls = calls[(calls['volume'] > 10) & (calls['openInterest'] > 50)]
         if calls.empty: return None
+        
+        # Midpoint Price
         calls['mid'] = (calls['bid'] + calls['ask']) / 2
         calls['price'] = np.where((calls['bid']==0), calls['lastPrice'], calls['mid'])
         
         df = calls[['strike', 'price']].sort_values('strike')
         
-        # Spline Fit & 2nd Derivative
+        # Spline Fit & Differentiation
         spline = UnivariateSpline(df['strike'], df['price'], k=4, s=len(df)*2)
         strikes_smooth = np.linspace(df['strike'].min(), df['strike'].max(), 200)
         
-        # PDF = 2nd Derivative of Price w.r.t Strike
+        # 2nd Derivative
         pdf = spline.derivative(n=2)(strikes_smooth)
         pdf = np.maximum(pdf, 0) # Remove negatives
         
-        # Find Peak
         peak_price = strikes_smooth[np.argmax(pdf)]
         
         return {"strikes": strikes_smooth, "pdf": pdf, "peak": peak_price, "date": target_exp}
     except: return None
 
-# [PRESERVED] Intraday Calcs
+# --- TECHNICAL CALCULATIONS ---
+
 def calculate_vwap(df):
     if df.empty: return df
     df['TP'] = (df['High'] + df['Low'] + df['Close']) / 3
@@ -189,7 +202,6 @@ def calculate_rsi(series, period=14):
     rs = gain / loss
     return 100 - (100 / (1 + rs))
 
-# [PRESERVED] Monte Carlo & Correlation
 @st.cache_data(ttl=3600)
 def get_correlation_data():
     tickers = {v['ticker']: k for k, v in ASSETS.items()}
@@ -214,7 +226,6 @@ def generate_monte_carlo(stock_data, days=126, simulations=1000):
     for t in range(1, days + 1): price_paths[t] = price_paths[t - 1] * daily_returns[t - 1]
     return pd.date_range(start=close.index[-1], periods=days + 1, freq='B'), price_paths
 
-# [PRESERVED] AI Sentiment
 @st.cache_data(ttl=900)
 def get_ai_sentiment(api_key, asset_name, news_items):
     if not api_key or not news_items or isinstance(news_items, str): return None
@@ -245,11 +256,11 @@ st.title(f"📊 {selected_asset} Pro Terminal")
 # Fetch Data
 daily_data = get_daily_data(asset_info['ticker'])
 intraday_data = get_intraday_data(asset_info['ticker'])
-macro_regime = get_macro_regime_data(fred_key) # New
-vol_forecast = calculate_volatility_permission(asset_info['ticker']) # New
-options_pdf = get_options_pdf(asset_info['opt_ticker']) # New
+macro_regime = get_macro_regime_data(fred_key)
+vol_forecast = calculate_volatility_permission(asset_info['ticker'])
+options_pdf = get_options_pdf(asset_info['opt_ticker'])
 
-# --- 1. OVERVIEW & MACRO REGIME (New & Preserved Merged) ---
+# --- 1. OVERVIEW & MACRO REGIME ---
 if not daily_data.empty:
     if isinstance(daily_data.columns, pd.MultiIndex): close, high, low, open_p = daily_data['Close'].iloc[:, 0], daily_data['High'].iloc[:, 0], daily_data['Low'].iloc[:, 0], daily_data['Open'].iloc[:, 0]
     else: close, high, low, open_p = daily_data['Close'], daily_data['High'], daily_data['Low'], daily_data['Open']
@@ -263,7 +274,7 @@ if not daily_data.empty:
     c2.metric("High", f"{high.max():,.2f}")
     c3.metric("Low", f"{low.min():,.2f}")
     
-    # [NEW CONCEPT] Macro Regime Display
+    # Macro Regime Badge
     if macro_regime:
         bias_color = "bullish" if macro_regime['bias'] == "BULLISH" else "bearish"
         c4.markdown(f"""
@@ -276,29 +287,88 @@ if not daily_data.empty:
     else:
         c4.metric("Vol", f"{(close.pct_change().std()* (252**0.5)*100):.2f}%")
 
-    # [PRESERVED] Main Chart
+    # Main Price Chart
     fig = go.Figure()
     fig.add_trace(go.Candlestick(x=daily_data.index, open=open_p, high=high, low=low, close=close, name="Price"))
     fig.update_layout(height=400, template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', xaxis_rangeslider_visible=False)
     st.plotly_chart(fig, use_container_width=True)
 
-# --- 2. VOLATILITY & INTRADAY (New Logic Inserted) ---
+# --- 2. VOLATILITY & INTRADAY ---
 st.markdown("---")
 st.subheader("⚡ Intraday & Volatility Permissions")
 
-if not intraday_data.empty:
-    # [NEW CONCEPT] Volatility Permission Logic
-    if vol_forecast:
-        v1, v2 = st.columns([1, 3])
-        with v1:
-            st.markdown("**Daily Volatility Filter**")
-            badge_class = "vol-go" if vol_forecast['is_go'] else "vol-stop"
-            st.markdown(f"<span class='{badge_class}'>{vol_forecast['signal']}</span>", unsafe_allow_html=True)
-            st.caption(f"Forecast Range: {vol_forecast['forecast']:.2f}% vs Baseline: {vol_forecast['baseline']:.2f}%")
-        with v2:
-            st.info("Log-GARCH model predicts if today's range warrants trading. Green = Expansion likely.")
-            
-    # [PRESERVED] Intraday Dashboard
+if not intraday_data.empty and vol_forecast:
+    # --- VOLATILITY VISUALIZATION ---
+    v1, v2 = st.columns([1, 3])
+    
+    with v1:
+        st.markdown("**Daily Volatility Filter**")
+        badge_class = "vol-go" if vol_forecast['is_go'] else "vol-stop"
+        st.markdown(f"<span class='{badge_class}'>{vol_forecast['signal']}</span>", unsafe_allow_html=True)
+        
+        st.markdown(f"""
+        <div style="margin-top: 10px; font-size: 0.9em;">
+            <strong>Expected TR:</strong> {vol_forecast['forecast']:.2f}%<br>
+            <span style="color: gray;">Baseline (20d): {vol_forecast['baseline']:.2f}%</span>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        delta = vol_forecast['forecast'] - vol_forecast['baseline']
+        d_color = "green" if delta > 0 else "red"
+        st.markdown(f"Regime Delta: <span style='color:{d_color}'>{delta:+.2f}%</span>", unsafe_allow_html=True)
+
+    with v2:
+        # Prepare Data for Plotting
+        hist_tr = vol_forecast['history'].tail(40)
+        hist_base = vol_forecast['baseline_history'].tail(40)
+        
+        # Create Composite Chart
+        fig_vol = go.Figure()
+        
+        # 1. Historical Realized Volatility
+        fig_vol.add_trace(go.Bar(
+            x=hist_tr.index, 
+            y=hist_tr.values,
+            name="Realized TR%",
+            marker_color='#333333'
+        ))
+        
+        # 2. Baseline Threshold
+        fig_vol.add_trace(go.Scatter(
+            x=hist_base.index,
+            y=hist_base.values,
+            name="Baseline (20d)",
+            line=dict(color='gray', dash='dot', width=2)
+        ))
+        
+        # 3. Forecast Bar
+        next_day = hist_tr.index[-1] + timedelta(days=1)
+        f_color = '#00ff00' if vol_forecast['is_go'] else '#ff4b4b'
+        
+        fig_vol.add_trace(go.Bar(
+            x=[next_day],
+            y=[vol_forecast['forecast']],
+            name="Expected TR% (Forecast)",
+            marker_color=f_color,
+            text=[f"{vol_forecast['forecast']:.2f}%"],
+            textposition='auto'
+        ))
+
+        fig_vol.update_layout(
+            title="Volatility Regime: Realized vs. Expected True Range",
+            yaxis_title="True Range %",
+            template="plotly_dark",
+            height=300,
+            margin=dict(l=20, r=20, t=40, b=20),
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(0,0,0,0)',
+            showlegend=True,
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+        )
+        st.plotly_chart(fig_vol, use_container_width=True)
+
+    # --- INTRADAY METRICS ---
+    st.markdown("##### ⏱️ Intraday Momentum")
     if isinstance(intraday_data.columns, pd.MultiIndex): i_close = intraday_data['Close'].iloc[:, 0]; i_vol = intraday_data['Volume'].iloc[:, 0]
     else: i_close = intraday_data['Close']; i_vol = intraday_data['Volume']
     
@@ -317,7 +387,7 @@ if not intraday_data.empty:
     with col_dash3:
         st.metric("Gap %", f"{((open_p.iloc[-1] - close.iloc[-2])/close.iloc[-2]*100):.2f}%")
 
-# --- 3. [NEW CONCEPT] OPTIONS HEATMAP (Institutional View) ---
+# --- 3. OPTIONS HEATMAP ---
 st.markdown("---")
 st.subheader("🏦 Institutional Expectations (Options Market)")
 if options_pdf:
@@ -337,7 +407,7 @@ if options_pdf:
 else:
     st.warning("Options data unavailable for this asset (or market closed).")
 
-# --- 4. [PRESERVED] PREDICTION (Monte Carlo) ---
+# --- 4. PREDICTION ---
 st.markdown("---")
 st.subheader("🔮 6-Month Projection (Monte Carlo)")
 if not daily_data.empty:
@@ -346,12 +416,11 @@ if not daily_data.empty:
     hist_slice = close.tail(90)
     fig_pred.add_trace(go.Scatter(x=hist_slice.index, y=hist_slice.values, name='History', line=dict(color='white')))
     fig_pred.add_trace(go.Scatter(x=pred_dates, y=np.mean(pred_paths, axis=1), name='Avg Path', line=dict(color='#00ff00', dash='dash')))
-    # Add light potential paths
     for i in range(50): fig_pred.add_trace(go.Scatter(x=pred_dates, y=pred_paths[:, i], mode='lines', line=dict(color='cyan', width=1), opacity=0.05, showlegend=False))
     fig_pred.update_layout(height=400, template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
     st.plotly_chart(fig_pred, use_container_width=True)
 
-# --- 5. [PRESERVED] CORRELATIONS & SENTIMENT ---
+# --- 5. CORRELATIONS & SENTIMENT ---
 st.markdown("---")
 st.subheader("🌐 Global Context & News")
 corr_data = get_correlation_data()
