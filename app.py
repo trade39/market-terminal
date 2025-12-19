@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import requests
-import cot_reports as cot  # NEW LIBRARY
+import cot_reports as cot
 from newsapi import NewsApiClient
 from datetime import datetime, timedelta
 from scipy.stats import norm
@@ -12,7 +12,7 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.mixture import GaussianMixture
 
 # --- APP CONFIGURATION ---
-st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V3.6", page_icon="💹")
+st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V3.7", page_icon="💹")
 
 # --- BLOOMBERG TERMINAL STYLING (CSS) ---
 st.markdown("""
@@ -68,8 +68,7 @@ ASSETS = {
     "S&P 500": {"ticker": "^GSPC", "opt_ticker": "SPY", "news_query": "S&P 500"},
     "NASDAQ": {"ticker": "^IXIC", "opt_ticker": "QQQ", "news_query": "Nasdaq"},
     "EUR/USD": {"ticker": "EURUSD=X", "opt_ticker": None, "news_query": "EURUSD"}, 
-    # NVIDIA REMOVED as requested for CFTC compatibility context
-    "Bitcoin": {"ticker": "BTC-USD", "opt_ticker": None, "news_query": "Bitcoin"}
+    "Bitcoin": {"ticker": "BTC-USD", "opt_ticker": "BITO", "news_query": "Bitcoin"} # Added BITO for BTC Options
 }
 
 # Mapping for cot_reports library (Legacy Futures Names)
@@ -171,11 +170,8 @@ def get_ml_prediction(ticker):
         return model, prob_up
     except: return None, 0.5
 
-# --- 3. GAMMA EXPOSURE ENGINE (Extracted Logic) ---
+# --- 3. GAMMA EXPOSURE ENGINE (FIXED & ROBUST) ---
 def calculate_black_scholes_gamma(S, K, T, r, sigma):
-    """
-    S: Spot Price, K: Strike, T: Time (years), r: Risk-free rate, sigma: Implied Vol
-    """
     if T <= 0 or sigma <= 0: return 0
     d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
     gamma = norm.pdf(d1) / (S * sigma * np.sqrt(T))
@@ -187,36 +183,48 @@ def get_gex_profile(opt_ticker):
     try:
         tk = yf.Ticker(opt_ticker)
         
-        # 1. Fetch Spot Price (Robust)
-        hist = tk.history(period="1d")
-        if hist.empty: return None, None, None
-        spot_price = hist['Close'].iloc[-1]
+        # 1. Robust Spot Price Fetch
+        try:
+            hist = tk.history(period="1d")
+            if not hist.empty:
+                spot_price = hist['Close'].iloc[-1]
+            else:
+                # Fallback to fast_info if history fails
+                spot_price = tk.fast_info.last_price
+        except:
+            return None, None, None
 
-        # 2. Fetch Options Expirations
+        if spot_price is None: return None, None, None
+
+        # 2. Robust Expiration Fetch
         exps = tk.options
-        if not exps or len(exps) < 2: return None, None, None
-        target_exp = exps[1] # Use next expiration
+        if not exps: return None, None, None
         
-        # 3. Fetch Option Chain
+        # Try to get the next expiration (better liquidity), fallback to first if only 1 exists
+        if len(exps) > 1:
+            target_exp = exps[1] 
+        else:
+            target_exp = exps[0]
+            
+        # 3. Fetch Chain
         chain = tk.option_chain(target_exp)
         calls, puts = chain.calls, chain.puts
         
         if calls.empty or puts.empty: return None, None, None
 
         # 4. Parameters
-        r = 0.045 # Fixed risk-free rate assumption
+        r = 0.045
         exp_date = datetime.strptime(target_exp, "%Y-%m-%d")
         days_to_exp = (exp_date - datetime.now()).days
-        if days_to_exp <= 0: T = 0.001 
-        else: T = days_to_exp / 365.0
+        # Prevent division by zero if expiring today
+        T = 0.001 if days_to_exp <= 0 else days_to_exp / 365.0
         
         gex_data = []
-        # Get unique strikes
         strikes = sorted(list(set(calls['strike'].tolist() + puts['strike'].tolist())))
         
         for K in strikes:
-            # 5. Filter Strikes (Optimization: +/- 30% of Spot)
-            if K < spot_price * 0.7 or K > spot_price * 1.3: continue 
+            # 5. Filter Strikes (Keep it tight to avoid noise: +/- 25% of spot)
+            if K < spot_price * 0.75 or K > spot_price * 1.25: continue
             
             # Call Data
             c_row = calls[calls['strike'] == K]
@@ -232,16 +240,16 @@ def get_gex_profile(opt_ticker):
             c_gamma = calculate_black_scholes_gamma(spot_price, K, T, r, c_iv)
             p_gamma = calculate_black_scholes_gamma(spot_price, K, T, r, p_iv)
             
-            # Net Gamma: (Call Gamma * OI) - (Put Gamma * OI) * Spot * 100
+            # Net Gamma
             net_gex = (c_gamma * c_oi - p_gamma * p_oi) * spot_price * 100
             gex_data.append({"strike": K, "gex": net_gex})
             
         df = pd.DataFrame(gex_data, columns=['strike', 'gex'])
-        
         if df.empty: return None, None, None
             
         return df, target_exp, spot_price 
     except Exception as e:
+        # st.error(f"Debug GEX Error: {e}") # Uncomment to see error in app
         return None, None, None
 
 # --- 4. VOLUME PROFILE ENGINE ---
@@ -534,7 +542,7 @@ def get_correlations(base_ticker):
         return corrs.drop(base_ticker) 
     except: return pd.Series()
 
-# F. CFTC COT ENGINE (NEW)
+# F. CFTC COT ENGINE
 @st.cache_data(ttl=86400) # Cache for 24h
 def get_cot_data(asset_name):
     """Fetches CFTC Legacy Futures data for smart money tracking."""
@@ -637,7 +645,7 @@ with st.sidebar:
     if st.button(">> REFRESH DATA"): st.cache_data.clear()
 
 # --- MAIN DASHBOARD ---
-st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V3.6</span></h1>", unsafe_allow_html=True)
+st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V3.7</span></h1>", unsafe_allow_html=True)
 
 # Fetch Data
 daily_data = get_daily_data(asset_info['ticker'])
@@ -956,7 +964,7 @@ fig_pred.add_trace(go.Scatter(x=pred_dates, y=np.mean(pred_paths, axis=1), name=
 terminal_chart_layout(fig_pred, title="MONTE CARLO PROJECTION (126 Days)", height=400)
 st.plotly_chart(fig_pred, use_container_width=True)
 
-# --- 8. CFTC COT DISPLAY (NEW) ---
+# --- 8. CFTC COT DISPLAY ---
 if cot_data:
     st.markdown("---")
     st.markdown("### 🏛️ CFTC COMMITMENTS OF TRADERS")
