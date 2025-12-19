@@ -14,7 +14,7 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.mixture import GaussianMixture
 
 # --- APP CONFIGURATION ---
-st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V4", page_icon="💹")
+st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V4.1", page_icon="💹")
 
 # --- BLOOMBERG TERMINAL STYLING (CSS) ---
 st.markdown("""
@@ -181,7 +181,7 @@ def get_ml_prediction(ticker):
         return model, prob_up
     except: return None, 0.5
 
-# --- 3. GAMMA EXPOSURE ENGINE ---
+# --- 3. GAMMA EXPOSURE ENGINE (FIXED) ---
 def calculate_black_scholes_gamma(S, K, T, r, sigma):
     if T <= 0 or sigma <= 0: return 0
     d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
@@ -189,9 +189,15 @@ def calculate_black_scholes_gamma(S, K, T, r, sigma):
     return gamma
 
 @st.cache_data(ttl=3600)
-def get_gex_profile(opt_ticker, spot_price):
+def get_gex_profile(opt_ticker): # REMOVED SPOT_PRICE ARG TO PREVENT MISMATCH
     try:
         tk = yf.Ticker(opt_ticker)
+        
+        # FIX: FETCH SPOT PRICE OF THE ETF, NOT THE FUTURES
+        hist = tk.history(period="1d")
+        if hist.empty: return None, None
+        spot_price = hist['Close'].iloc[-1]
+
         exps = tk.options
         if not exps or len(exps) < 2: return None, None
         target_exp = exps[1]
@@ -211,6 +217,7 @@ def get_gex_profile(opt_ticker, spot_price):
         strikes = sorted(list(set(calls['strike'].tolist() + puts['strike'].tolist())))
         
         for K in strikes:
+            # Filter relative to the correct spot price
             if K < spot_price * 0.7 or K > spot_price * 1.3: continue 
             
             c_row = calls[calls['strike'] == K]
@@ -231,9 +238,9 @@ def get_gex_profile(opt_ticker, spot_price):
         
         if df.empty: return None, None
             
-        return df, target_exp
+        return df, target_exp, spot_price # Return spot_price for the chart
     except Exception as e:
-        return None, None
+        return None, None, None
 
 # --- 4. VOLUME PROFILE ENGINE ---
 def calculate_volume_profile(df, bins=50):
@@ -434,7 +441,7 @@ with st.sidebar:
     if st.button(">> REFRESH DATA"): st.cache_data.clear()
 
 # --- MAIN DASHBOARD ---
-st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V4</span></h1>", unsafe_allow_html=True)
+st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V4.1</span></h1>", unsafe_allow_html=True)
 
 # Fetch Data
 daily_data = get_daily_data(asset_info['ticker'])
@@ -446,7 +453,7 @@ latest_news = get_news(news_key, asset_info['news_query'])
 
 # New Quant Engines
 _, ml_prob = get_ml_prediction(asset_info['ticker'])
-gex_df, gex_date = get_gex_profile(asset_info['opt_ticker'], daily_data['Close'].iloc[-1] if not daily_data.empty else 0)
+gex_df, gex_date, gex_spot = get_gex_profile(asset_info['opt_ticker']) # Fixed Function Call
 vol_profile, poc_price = calculate_volume_profile(intraday_data)
 
 # Institutional Engines
@@ -510,7 +517,7 @@ if not daily_data.empty:
     fig.update_xaxes(rangeslider_visible=False)
     st.plotly_chart(fig, use_container_width=True)
 
-# --- 2. ECONOMIC CALENDAR (UPDATED) ---
+# --- 2. ECONOMIC CALENDAR ---
 st.markdown("---")
 st.markdown("### 📅 HIGH IMPACT ECONOMIC EVENTS (USD)")
 
@@ -527,19 +534,13 @@ if eco_events:
         forecast = event.get('forecast', '')
         previous = event.get('previous', '')
         
-        # LOGIC: 
-        # If Happened: Actual vs Forecast
-        # If Upcoming: Forecast vs Previous
-        
         context_msg = ""
         bias = "Neutral"
         
         if actual and actual != '':
-            # Event Happened
             bias = analyze_event_impact(name, actual, forecast)
             context_msg = f"Actual ({actual}) vs Forecast ({forecast})"
         elif forecast and forecast != '':
-            # Event Upcoming
             bias = analyze_event_impact(name, forecast, previous)
             context_msg = f"Forecast ({forecast}) vs Previous ({previous})"
         else:
@@ -549,7 +550,6 @@ if eco_events:
         
     df_cal = pd.DataFrame(cal_data)
     
-    # Highlight function for dataframe
     def highlight_bias(val):
         color = ''
         if 'Bullish' in val: color = '#00ff00'
@@ -608,16 +608,16 @@ if not intraday_data.empty and vol_forecast:
 st.markdown("---")
 st.markdown("### 🏦 INSTITUTIONAL GAMMA EXPOSURE (GEX)")
 
-if gex_df is not None:
+if gex_df is not None and gex_spot is not None:
     g1, g2 = st.columns([3, 1])
     with g1:
-        center_strike = curr
+        center_strike = gex_spot # Use the ETF spot price, not futures
         gex_zoom = gex_df[(gex_df['strike'] > center_strike * 0.9) & (gex_df['strike'] < center_strike * 1.1)]
         
         fig_gex = go.Figure()
         colors = ['#00ff00' if x > 0 else '#ff3333' for x in gex_zoom['gex']]
         fig_gex.add_trace(go.Bar(x=gex_zoom['strike'], y=gex_zoom['gex'], marker_color=colors))
-        fig_gex.add_vline(x=curr, line_dash="dot", line_color="white", annotation_text="SPOT")
+        fig_gex.add_vline(x=center_strike, line_dash="dot", line_color="white", annotation_text="ETF SPOT")
         terminal_chart_layout(fig_gex, title=f"NET GAMMA PROFILE (EXP: {gex_date})")
         st.plotly_chart(fig_gex, use_container_width=True)
         
@@ -640,7 +640,7 @@ if gex_df is not None:
 else:
     st.info("NO OPTIONS DATA AVAILABLE OR GEX CALCULATION FAILED.")
 
-# --- 5. LATEST NEWS WIRE (NEW) ---
+# --- 5. LATEST NEWS WIRE ---
 st.markdown("---")
 st.markdown("### 📰 LATEST WIRE")
 if latest_news:
