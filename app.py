@@ -161,8 +161,11 @@ def get_ml_prediction(ticker):
         return model, prob_up
     except: return None, 0.5
 
-# --- 3. GAMMA EXPOSURE ENGINE ---
+# --- 3. GAMMA EXPOSURE ENGINE (UPDATED LOGIC) ---
 def calculate_black_scholes_gamma(S, K, T, r, sigma):
+    """
+    S: Spot Price, K: Strike, T: Time (years), r: Risk-free rate, sigma: Implied Vol
+    """
     if T <= 0 or sigma <= 0: return 0
     d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
     gamma = norm.pdf(d1) / (S * sigma * np.sqrt(T))
@@ -173,45 +176,63 @@ def get_gex_profile(opt_ticker):
     if opt_ticker is None: return None, None, None
     try:
         tk = yf.Ticker(opt_ticker)
+        
+        # 1. Fetch Spot Price (Robust)
         hist = tk.history(period="1d")
         if hist.empty: return None, None, None
         spot_price = hist['Close'].iloc[-1]
+
+        # 2. Fetch Options Expirations
         exps = tk.options
         if not exps or len(exps) < 2: return None, None, None
-        target_exp = exps[1]
+        target_exp = exps[1] # Use next expiration
+        
+        # 3. Fetch Option Chain
         chain = tk.option_chain(target_exp)
         calls, puts = chain.calls, chain.puts
+        
         if calls.empty or puts.empty: return None, None, None
 
-        r = 0.045
+        # 4. Parameters
+        r = 0.045 # Fixed risk-free rate assumption
         exp_date = datetime.strptime(target_exp, "%Y-%m-%d")
         days_to_exp = (exp_date - datetime.now()).days
-        T = 0.001 if days_to_exp <= 0 else days_to_exp / 365.0
+        if days_to_exp <= 0: T = 0.001 
+        else: T = days_to_exp / 365.0
         
         gex_data = []
+        # Get unique strikes
         strikes = sorted(list(set(calls['strike'].tolist() + puts['strike'].tolist())))
         
         for K in strikes:
-            if K < spot_price * 0.7 or K > spot_price * 1.3: continue
+            # 5. Filter Strikes (Optimization: +/- 30% of Spot)
+            if K < spot_price * 0.7 or K > spot_price * 1.3: continue 
             
+            # Call Data
             c_row = calls[calls['strike'] == K]
             c_oi = c_row['openInterest'].iloc[0] if not c_row.empty else 0
             c_iv = c_row['impliedVolatility'].iloc[0] if not c_row.empty and 'impliedVolatility' in c_row.columns else 0.2
             
+            # Put Data
             p_row = puts[puts['strike'] == K]
             p_oi = p_row['openInterest'].iloc[0] if not p_row.empty else 0
             p_iv = p_row['impliedVolatility'].iloc[0] if not p_row.empty and 'impliedVolatility' in p_row.columns else 0.2
             
+            # 6. Calculate Gamma
             c_gamma = calculate_black_scholes_gamma(spot_price, K, T, r, c_iv)
             p_gamma = calculate_black_scholes_gamma(spot_price, K, T, r, p_iv)
             
+            # Net Gamma: (Call Gamma * OI) - (Put Gamma * OI) * Spot * 100
             net_gex = (c_gamma * c_oi - p_gamma * p_oi) * spot_price * 100
             gex_data.append({"strike": K, "gex": net_gex})
             
         df = pd.DataFrame(gex_data, columns=['strike', 'gex'])
+        
         if df.empty: return None, None, None
-        return df, target_exp, spot_price
-    except: return None, None, None
+            
+        return df, target_exp, spot_price # Return spot_price for the chart
+    except Exception as e:
+        return None, None, None
 
 # --- 4. VOLUME PROFILE ENGINE ---
 def calculate_volume_profile(df, bins=50):
@@ -794,6 +815,7 @@ if not vwap_df.empty:
 # --- 6. GEX ---
 st.markdown("---")
 st.markdown("### 🏦 INSTITUTIONAL GAMMA EXPOSURE (GEX)")
+
 
 if gex_df is not None and gex_spot is not None:
     g1, g2 = st.columns([3, 1])
