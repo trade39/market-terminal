@@ -11,7 +11,7 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.mixture import GaussianMixture
 
 # --- APP CONFIGURATION ---
-st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V3.1", page_icon="💹")
+st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V3.2", page_icon="💹")
 
 # --- BLOOMBERG TERMINAL STYLING (CSS) ---
 st.markdown("""
@@ -65,14 +65,14 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- CONSTANTS & MAPPINGS ---
+# --- CONSTANTS & MAPPINGS (UPDATED FOR NEWS) ---
 ASSETS = {
-    "Gold (Comex)": {"ticker": "GC=F", "opt_ticker": "GLD"},
-    "S&P 500": {"ticker": "^GSPC", "opt_ticker": "SPY"},
-    "NASDAQ": {"ticker": "^IXIC", "opt_ticker": "QQQ"},
-    "EUR/USD": {"ticker": "EURUSD=X", "opt_ticker": None}, 
-    "NVIDIA": {"ticker": "NVDA", "opt_ticker": "NVDA"},
-    "Bitcoin": {"ticker": "BTC-USD", "opt_ticker": None}
+    "Gold (Comex)": {"ticker": "GC=F", "opt_ticker": "GLD", "news_query": "Gold Price"},
+    "S&P 500": {"ticker": "^GSPC", "opt_ticker": "SPY", "news_query": "S&P 500"},
+    "NASDAQ": {"ticker": "^IXIC", "opt_ticker": "QQQ", "news_query": "Nasdaq"},
+    "EUR/USD": {"ticker": "EURUSD=X", "opt_ticker": None, "news_query": "EURUSD"}, 
+    "NVIDIA": {"ticker": "NVDA", "opt_ticker": "NVDA", "news_query": "NVDA"},
+    "Bitcoin": {"ticker": "BTC-USD", "opt_ticker": None, "news_query": "Bitcoin"}
 }
 
 # --- HELPER FUNCTIONS ---
@@ -300,15 +300,17 @@ def analyze_eco_context(actual_str, forecast_str, previous_str):
 
     return context_str, bias
 
+# --- UPDATED NEWS FUNCTION ---
 @st.cache_data(ttl=3600)
 def get_financial_news(api_key, query="Finance"):
     if not api_key: return []
     try:
         newsapi = NewsApiClient(api_key=api_key)
-        top_headlines = newsapi.get_top_headlines(q=None, category='business', language='en', country='us')
+        # UPDATED: Uses get_everything with specific query and sort by time
+        all_articles = newsapi.get_everything(q=query, language='en', sort_by='publishedAt')
         articles = []
-        if top_headlines['status'] == 'ok':
-            for art in top_headlines['articles'][:5]:
+        if all_articles['status'] == 'ok':
+            for art in all_articles['articles'][:5]:
                 articles.append({"title": art['title'], "source": art['source']['name'], "url": art['url'], "time": art['publishedAt']})
         return articles
     except: return []
@@ -488,13 +490,15 @@ with st.sidebar:
     if st.button(">> REFRESH DATA"): st.cache_data.clear()
 
 # --- MAIN DASHBOARD ---
-st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V3.1</span></h1>", unsafe_allow_html=True)
+st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V3.2</span></h1>", unsafe_allow_html=True)
 
 # Fetch Data
 daily_data = get_daily_data(asset_info['ticker'])
 intraday_data = get_intraday_data(asset_info['ticker'])
 eco_events = get_economic_calendar(rapid_key)
-news_items = get_financial_news(news_key, query="Finance")
+
+# UPDATED: FETCH NEWS USING SPECIFIC QUERY
+news_items = get_financial_news(news_key, query=asset_info.get('news_query', 'Finance'))
 
 # Engines
 _, ml_prob = get_ml_prediction(asset_info['ticker'])
@@ -584,7 +588,7 @@ with col_eco:
         st.info("NO HIGH IMPACT USD EVENTS SCHEDULED.")
 
 with col_news:
-    st.markdown("### 📰 LATEST WIRE")
+    st.markdown(f"### 📰 {asset_info.get('news_query', 'LATEST')} WIRE")
     if news_items:
         for news in news_items:
             st.markdown(f"""
