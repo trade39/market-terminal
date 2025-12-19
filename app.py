@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import requests
+import cot_reports as cot  # NEW LIBRARY
 from newsapi import NewsApiClient
 from datetime import datetime, timedelta
 from scipy.stats import norm
@@ -11,7 +12,7 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.mixture import GaussianMixture
 
 # --- APP CONFIGURATION ---
-st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V3.5", page_icon="💹")
+st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V3.6", page_icon="💹")
 
 # --- BLOOMBERG TERMINAL STYLING (CSS) ---
 st.markdown("""
@@ -67,8 +68,17 @@ ASSETS = {
     "S&P 500": {"ticker": "^GSPC", "opt_ticker": "SPY", "news_query": "S&P 500"},
     "NASDAQ": {"ticker": "^IXIC", "opt_ticker": "QQQ", "news_query": "Nasdaq"},
     "EUR/USD": {"ticker": "EURUSD=X", "opt_ticker": None, "news_query": "EURUSD"}, 
-    "NVIDIA": {"ticker": "NVDA", "opt_ticker": "NVDA", "news_query": "NVDA"},
+    # NVIDIA REMOVED as requested for CFTC compatibility context
     "Bitcoin": {"ticker": "BTC-USD", "opt_ticker": None, "news_query": "Bitcoin"}
+}
+
+# Mapping for cot_reports library (Legacy Futures Names)
+COT_MAPPING = {
+    "Gold (Comex)": {"name": "GOLD - COMMODITY EXCHANGE INC."},
+    "S&P 500": {"name": "E-MINI S&P 500 - CHICAGO MERCANTILE EXCHANGE"},
+    "NASDAQ": {"name": "NASDAQ-100 CONSOLIDATED - CHICAGO MERCANTILE EXCHANGE"},
+    "EUR/USD": {"name": "EURO FX - CHICAGO MERCANTILE EXCHANGE"},
+    "Bitcoin": {"name": "BITCOIN - CHICAGO MERCANTILE EXCHANGE"}
 }
 
 # --- HELPER FUNCTIONS ---
@@ -161,7 +171,7 @@ def get_ml_prediction(ticker):
         return model, prob_up
     except: return None, 0.5
 
-# --- 3. GAMMA EXPOSURE ENGINE (UPDATED LOGIC) ---
+# --- 3. GAMMA EXPOSURE ENGINE (Extracted Logic) ---
 def calculate_black_scholes_gamma(S, K, T, r, sigma):
     """
     S: Spot Price, K: Strike, T: Time (years), r: Risk-free rate, sigma: Implied Vol
@@ -230,7 +240,7 @@ def get_gex_profile(opt_ticker):
         
         if df.empty: return None, None, None
             
-        return df, target_exp, spot_price # Return spot_price for the chart
+        return df, target_exp, spot_price 
     except Exception as e:
         return None, None, None
 
@@ -524,6 +534,49 @@ def get_correlations(base_ticker):
         return corrs.drop(base_ticker) 
     except: return pd.Series()
 
+# F. CFTC COT ENGINE (NEW)
+@st.cache_data(ttl=86400) # Cache for 24h
+def get_cot_data(asset_name):
+    """Fetches CFTC Legacy Futures data for smart money tracking."""
+    if asset_name not in COT_MAPPING:
+        return None
+    
+    contract_name = COT_MAPPING[asset_name]["name"]
+    
+    try:
+        # Load most recent year's data
+        df = pd.DataFrame(cot.cot_year(datetime.now().year, cot_report_type='legacy_fut'))
+        
+        # Filter for contract
+        asset_df = df[df['Market_and_Exchange_Names'] == contract_name].copy()
+        
+        if asset_df.empty:
+            # Fallback to previous year
+            df = pd.DataFrame(cot.cot_year(datetime.now().year - 1, cot_report_type='legacy_fut'))
+            asset_df = df[df['Market_and_Exchange_Names'] == contract_name].copy()
+            
+        if asset_df.empty: return None
+
+        # Sort
+        asset_df['Date'] = pd.to_datetime(asset_df['As_of_Date_In_Form_YYMMDD'], format='%y%m%d')
+        latest = asset_df.sort_values('Date').iloc[-1]
+        
+        comm_net = latest['Comm_Positions_Long_All'] - latest['Comm_Positions_Short_All']
+        spec_net = latest['NonComm_Positions_Long_All'] - latest['NonComm_Positions_Short_All']
+        
+        sentiment = "BULLISH" if comm_net > 0 else "BEARISH"
+        if asset_name in ["S&P 500", "NASDAQ", "Bitcoin"]:
+            sentiment = "HEDGED (See Specs)"
+            
+        return {
+            "date": latest['Date'].strftime('%Y-%m-%d'),
+            "comm_net": comm_net,
+            "spec_net": spec_net,
+            "sentiment": sentiment
+        }
+    except Exception as e:
+        return None
+
 # --- 8. DATA FETCHERS ---
 @st.cache_data(ttl=60)
 def get_daily_data(ticker):
@@ -584,7 +637,7 @@ with st.sidebar:
     if st.button(">> REFRESH DATA"): st.cache_data.clear()
 
 # --- MAIN DASHBOARD ---
-st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V3.5</span></h1>", unsafe_allow_html=True)
+st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V3.6</span></h1>", unsafe_allow_html=True)
 
 # Fetch Data
 daily_data = get_daily_data(asset_info['ticker'])
@@ -598,6 +651,7 @@ gex_df, gex_date, gex_spot = get_gex_profile(asset_info['opt_ticker'])
 vol_profile, poc_price = calculate_volume_profile(intraday_data)
 hurst = calculate_hurst(daily_data['Close'].values) if not daily_data.empty else 0.5
 regime_data = get_market_regime(asset_info['ticker'])
+cot_data = get_cot_data(selected_asset) # Fetch COT Data
 
 # --- 1. OVERVIEW ---
 if not daily_data.empty:
@@ -902,7 +956,23 @@ fig_pred.add_trace(go.Scatter(x=pred_dates, y=np.mean(pred_paths, axis=1), name=
 terminal_chart_layout(fig_pred, title="MONTE CARLO PROJECTION (126 Days)", height=400)
 st.plotly_chart(fig_pred, use_container_width=True)
 
-# --- 8. CONCLUSION ---
+# --- 8. CFTC COT DISPLAY (NEW) ---
+if cot_data:
+    st.markdown("---")
+    st.markdown("### 🏛️ CFTC COMMITMENTS OF TRADERS")
+    c_cot1, c_cot2, c_cot3 = st.columns(3)
+    
+    c_cot1.metric("Commercials (Smart Money)", f"{cot_data['comm_net']:,.0f}", help="Commercial Hedgers Net Position")
+    c_cot2.metric("Speculators (Funds)", f"{cot_data['spec_net']:,.0f}", help="Non-Commercial/Managed Money Net Position")
+    c_cot3.markdown(f"""
+    <div class='terminal-box' style='text-align:center;'>
+        <div style='font-size:0.8em; color:gray;'>SENTIMENT</div>
+        <div style='font-size:1.2em; font-weight:bold; color:white;'>{cot_data['sentiment']}</div>
+        <div style='font-size:0.7em;'>Date: {cot_data['date']}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+# --- 9. CONCLUSION ---
 st.markdown("---")
 st.markdown("### 🏁 EXECUTIVE SUMMARY")
 
