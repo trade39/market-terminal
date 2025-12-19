@@ -4,15 +4,21 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import requests
-import cot_reports as cot
 from newsapi import NewsApiClient
 from datetime import datetime, timedelta
 from scipy.stats import norm
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.mixture import GaussianMixture
 
+# Try/Except for COT Reports to prevent crash if library missing
+try:
+    import cot_reports as cot
+    COT_AVAILABLE = True
+except ImportError:
+    COT_AVAILABLE = False
+
 # --- APP CONFIGURATION ---
-st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V3.7", page_icon="💹")
+st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V3.8", page_icon="💹")
 
 # --- BLOOMBERG TERMINAL STYLING (CSS) ---
 st.markdown("""
@@ -68,10 +74,9 @@ ASSETS = {
     "S&P 500": {"ticker": "^GSPC", "opt_ticker": "SPY", "news_query": "S&P 500"},
     "NASDAQ": {"ticker": "^IXIC", "opt_ticker": "QQQ", "news_query": "Nasdaq"},
     "EUR/USD": {"ticker": "EURUSD=X", "opt_ticker": None, "news_query": "EURUSD"}, 
-    "Bitcoin": {"ticker": "BTC-USD", "opt_ticker": "BITO", "news_query": "Bitcoin"} # Added BITO for BTC Options
+    "Bitcoin": {"ticker": "BTC-USD", "opt_ticker": "BITO", "news_query": "Bitcoin"}
 }
 
-# Mapping for cot_reports library (Legacy Futures Names)
 COT_MAPPING = {
     "Gold (Comex)": {"name": "GOLD - COMMODITY EXCHANGE INC."},
     "S&P 500": {"name": "E-MINI S&P 500 - CHICAGO MERCANTILE EXCHANGE"},
@@ -97,6 +102,12 @@ def flatten_dataframe(df):
     df = df.loc[:, ~df.columns.duplicated()]
     return df
 
+def calculate_drawdown(equity_curve):
+    """Calculates drawdown percentage series from equity curve."""
+    running_max = equity_curve.cummax()
+    drawdown = (equity_curve - running_max) / running_max
+    return drawdown
+
 # --- 1. QUANT ENGINE (GMM + HURST) ---
 def calculate_hurst(series, lags=range(2, 20)):
     try:
@@ -108,6 +119,7 @@ def calculate_hurst(series, lags=range(2, 20)):
 @st.cache_data(ttl=3600)
 def get_market_regime(ticker):
     try:
+        # Optimized: 5y is sufficient for GMM without being too heavy
         df = yf.download(ticker, period="5y", interval="1d", progress=False)
         df = flatten_dataframe(df)
         if df.empty: return None
@@ -140,37 +152,52 @@ def get_market_regime(ticker):
         return {"regime": regime_desc, "color": color, "confidence": max(probs)}
     except: return None
 
-# --- 2. MACHINE LEARNING ENGINE ---
+# --- 2. MACHINE LEARNING ENGINE (UPDATED: RSI + IMPORTANCE) ---
 @st.cache_data(ttl=3600)
 def get_ml_prediction(ticker):
     try:
         df = yf.download(ticker, period="2y", interval="1d", progress=False)
         df = flatten_dataframe(df) 
-        if df.empty: return None, 0.5
+        if df.empty: return None, 0.5, pd.DataFrame()
         
         data = df.copy()
         data['Returns'] = data['Close'].pct_change()
         data['Target'] = (data['Close'].shift(-1) > data['Close']).astype(int)
         
+        # Features
         data['Vol_5d'] = data['Returns'].rolling(5).std()
         data['Mom_5d'] = data['Close'].pct_change(5)
         
-        data = data.dropna()
-        if len(data) < 50: return None, 0.5
+        # Add RSI Calculation
+        delta = data['Close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss
+        data['RSI'] = 100 - (100 / (1 + rs))
         
-        features = ['Vol_5d', 'Mom_5d']
+        data = data.dropna()
+        if len(data) < 50: return None, 0.5, pd.DataFrame()
+        
+        features = ['Vol_5d', 'Mom_5d', 'RSI']
         X = data[features]
         y = data['Target']
         
         model = RandomForestClassifier(n_estimators=100, max_depth=3, random_state=42)
         model.fit(X, y)
         
+        # Extract Feature Importance
+        importances = pd.DataFrame({
+            'Feature': features,
+            'Importance': model.feature_importances_
+        }).sort_values(by='Importance', ascending=True) # Ascending for horizontal bar chart
+        
         last_row = X.iloc[[-1]]
         prob_up = model.predict_proba(last_row)[0][1]
-        return model, prob_up
-    except: return None, 0.5
+        
+        return model, prob_up, importances
+    except: return None, 0.5, pd.DataFrame()
 
-# --- 3. GAMMA EXPOSURE ENGINE (FIXED & ROBUST) ---
+# --- 3. GAMMA EXPOSURE ENGINE ---
 def calculate_black_scholes_gamma(S, K, T, r, sigma):
     if T <= 0 or sigma <= 0: return 0
     d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
@@ -182,65 +209,49 @@ def get_gex_profile(opt_ticker):
     if opt_ticker is None: return None, None, None
     try:
         tk = yf.Ticker(opt_ticker)
-        
-        # 1. Robust Spot Price Fetch
         try:
             hist = tk.history(period="1d")
             if not hist.empty:
                 spot_price = hist['Close'].iloc[-1]
             else:
-                # Fallback to fast_info if history fails
                 spot_price = tk.fast_info.last_price
-        except:
-            return None, None, None
+        except: return None, None, None
 
         if spot_price is None: return None, None, None
 
-        # 2. Robust Expiration Fetch
         exps = tk.options
         if not exps: return None, None, None
         
-        # Try to get the next expiration (better liquidity), fallback to first if only 1 exists
-        if len(exps) > 1:
-            target_exp = exps[1] 
-        else:
-            target_exp = exps[0]
+        # Target closest next expiry
+        target_exp = exps[1] if len(exps) > 1 else exps[0]
             
-        # 3. Fetch Chain
         chain = tk.option_chain(target_exp)
         calls, puts = chain.calls, chain.puts
         
         if calls.empty or puts.empty: return None, None, None
 
-        # 4. Parameters
         r = 0.045
         exp_date = datetime.strptime(target_exp, "%Y-%m-%d")
         days_to_exp = (exp_date - datetime.now()).days
-        # Prevent division by zero if expiring today
         T = 0.001 if days_to_exp <= 0 else days_to_exp / 365.0
         
         gex_data = []
         strikes = sorted(list(set(calls['strike'].tolist() + puts['strike'].tolist())))
         
         for K in strikes:
-            # 5. Filter Strikes (Keep it tight to avoid noise: +/- 25% of spot)
             if K < spot_price * 0.75 or K > spot_price * 1.25: continue
             
-            # Call Data
             c_row = calls[calls['strike'] == K]
             c_oi = c_row['openInterest'].iloc[0] if not c_row.empty else 0
             c_iv = c_row['impliedVolatility'].iloc[0] if not c_row.empty and 'impliedVolatility' in c_row.columns else 0.2
             
-            # Put Data
             p_row = puts[puts['strike'] == K]
             p_oi = p_row['openInterest'].iloc[0] if not p_row.empty else 0
             p_iv = p_row['impliedVolatility'].iloc[0] if not p_row.empty and 'impliedVolatility' in p_row.columns else 0.2
             
-            # 6. Calculate Gamma
             c_gamma = calculate_black_scholes_gamma(spot_price, K, T, r, c_iv)
             p_gamma = calculate_black_scholes_gamma(spot_price, K, T, r, p_iv)
             
-            # Net Gamma
             net_gex = (c_gamma * c_oi - p_gamma * p_oi) * spot_price * 100
             gex_data.append({"strike": K, "gex": net_gex})
             
@@ -249,8 +260,21 @@ def get_gex_profile(opt_ticker):
             
         return df, target_exp, spot_price 
     except Exception as e:
-        # st.error(f"Debug GEX Error: {e}") # Uncomment to see error in app
         return None, None, None
+
+def find_zero_gamma(df):
+    """Identifies the price level where Gamma flips from positive to negative."""
+    try:
+        df = df.sort_values('strike')
+        # Check for sign change between consecutive strikes
+        df['sign_change'] = np.sign(df['gex']).diff()
+        # Get the strike where sign changed (Flip Point)
+        flip_rows = df[df['sign_change'] != 0].dropna()
+        if not flip_rows.empty:
+            return flip_rows.iloc[-1]['strike']
+        return None
+    except:
+        return None
 
 # --- 4. VOLUME PROFILE ENGINE ---
 def calculate_volume_profile(df, bins=50):
@@ -265,43 +289,36 @@ def calculate_volume_profile(df, bins=50):
     poc_price = vol_profile.loc[poc_idx, 'PriceLevel']
     return vol_profile, poc_price
 
-# --- 5. MONTE CARLO & ADVANCED SEASONALITY ---
+# --- 5. MONTE CARLO & SEASONALITY ---
 @st.cache_data(ttl=3600)
 def get_seasonality_stats(daily_data, ticker_name):
     stats = {}
     try:
-        # 1. Day of Week Stats
         df = daily_data.copy()
         df['Week_Num'] = df.index.to_period('W')
         high_days = df.groupby('Week_Num')['High'].idxmax().apply(lambda x: df.loc[x].name.day_name())
         days_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']
         stats['day_high'] = high_days.value_counts().reindex(days_order, fill_value=0) / len(high_days) * 100
 
-        # 2. Week of Month Stats
         df['Day'] = df.index.day
         df['Month_Week'] = np.ceil(df['Day'] / 7).astype(int)
         df['Returns'] = df['Close'].pct_change()
         week_stats = df.groupby('Month_Week')['Returns'].mean() * 100
         stats['week_returns'] = week_stats
 
-        # 3. Hourly Stats (Specific Windows - New York Time)
         try:
-            # Fetch 60 days of 1h data
-            intra = yf.download(ticker_name, period="60d", interval="1h", progress=False)
+            # Optimized fetch: 45 days is enough for hourly stats
+            intra = yf.download(ticker_name, period="45d", interval="1h", progress=False)
             intra = flatten_dataframe(intra)
             
             if not intra.empty:
-                # Convert to NY Time
                 if intra.index.tz is None:
                     intra.index = intra.index.tz_localize('UTC')
                 intra.index = intra.index.tz_convert('America/New_York')
                 
                 intra['Hour'] = intra.index.hour
                 intra['Return'] = intra['Close'].pct_change()
-                
-                # Requested windows
                 target_hours = [2,3,4,5,6, 8,9,10,11, 14,15,16,17,18, 20,21,22,23]
-                
                 hourly_perf = intra[intra['Hour'].isin(target_hours)].groupby('Hour')['Return'].mean() * 100
                 stats['hourly_perf'] = hourly_perf
         except Exception:
@@ -447,11 +464,9 @@ def calculate_vwap_bands(df):
     if df.empty: return df
     df = df.copy()
     
-    # Calculate Typical Price
     df['TP'] = (df['High'] + df['Low'] + df['Close']) / 3
     df['VP'] = df['TP'] * df['Volume']
     
-    # Group by Date to reset VWAP daily
     df['Date'] = df.index.date
     
     df['Cum_VP'] = df.groupby('Date')['VP'].cumsum()
@@ -545,27 +560,21 @@ def get_correlations(base_ticker):
 # F. CFTC COT ENGINE
 @st.cache_data(ttl=86400) # Cache for 24h
 def get_cot_data(asset_name):
-    """Fetches CFTC Legacy Futures data for smart money tracking."""
-    if asset_name not in COT_MAPPING:
-        return None
+    if not COT_AVAILABLE: return None
+    if asset_name not in COT_MAPPING: return None
     
     contract_name = COT_MAPPING[asset_name]["name"]
     
     try:
-        # Load most recent year's data
         df = pd.DataFrame(cot.cot_year(datetime.now().year, cot_report_type='legacy_fut'))
-        
-        # Filter for contract
         asset_df = df[df['Market_and_Exchange_Names'] == contract_name].copy()
         
         if asset_df.empty:
-            # Fallback to previous year
             df = pd.DataFrame(cot.cot_year(datetime.now().year - 1, cot_report_type='legacy_fut'))
             asset_df = df[df['Market_and_Exchange_Names'] == contract_name].copy()
             
         if asset_df.empty: return None
 
-        # Sort
         asset_df['Date'] = pd.to_datetime(asset_df['As_of_Date_In_Form_YYMMDD'], format='%y%m%d')
         latest = asset_df.sort_values('Date').iloc[-1]
         
@@ -589,7 +598,8 @@ def get_cot_data(asset_name):
 @st.cache_data(ttl=60)
 def get_daily_data(ticker):
     try:
-        data = yf.download(ticker, period="10y", interval="1d", progress=False)
+        # Optimized to 5y default
+        data = yf.download(ticker, period="5y", interval="1d", progress=False)
         return flatten_dataframe(data)
     except: return pd.DataFrame()
 
@@ -642,10 +652,24 @@ with st.sidebar:
     </div>
     """, unsafe_allow_html=True)
     
-    if st.button(">> REFRESH DATA"): st.cache_data.clear()
+    if st.button(">> REFRESH DATA"): 
+        st.cache_data.clear()
+        st.toast("System Refreshing...", icon="🔄")
+
+    # --- CSV DOWNLOAD ---
+    st.markdown("---")
+    daily_dl = get_daily_data(asset_info['ticker'])
+    if not daily_dl.empty:
+        csv = daily_dl.to_csv().encode('utf-8')
+        st.download_button(
+            label="⬇ DOWNLOAD OHLCV",
+            data=csv,
+            file_name=f'{selected_asset}_daily.csv',
+            mime='text/csv',
+        )
 
 # --- MAIN DASHBOARD ---
-st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V3.7</span></h1>", unsafe_allow_html=True)
+st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V3.8</span></h1>", unsafe_allow_html=True)
 
 # Fetch Data
 daily_data = get_daily_data(asset_info['ticker'])
@@ -654,12 +678,12 @@ eco_events = get_economic_calendar(rapid_key)
 news_items = get_financial_news(news_key, query=asset_info.get('news_query', 'Finance'))
 
 # Engines
-_, ml_prob = get_ml_prediction(asset_info['ticker'])
+ml_model, ml_prob, ml_imp = get_ml_prediction(asset_info['ticker'])
 gex_df, gex_date, gex_spot = get_gex_profile(asset_info['opt_ticker'])
 vol_profile, poc_price = calculate_volume_profile(intraday_data)
 hurst = calculate_hurst(daily_data['Close'].values) if not daily_data.empty else 0.5
 regime_data = get_market_regime(asset_info['ticker'])
-cot_data = get_cot_data(selected_asset) # Fetch COT Data
+cot_data = get_cot_data(selected_asset)
 
 # --- 1. OVERVIEW ---
 if not daily_data.empty:
@@ -674,13 +698,31 @@ if not daily_data.empty:
     ml_conf = abs(ml_prob - 0.5) * 200
     ml_color = "bullish" if ml_bias == "BULLISH" else "bearish" if ml_bias == "BEARISH" else "neutral"
     
-    c2.markdown(f"""
-    <div class='terminal-box' style="text-align:center; padding:5px;">
-        <div style="font-size:0.8em; color:#ff9900;">AI PREDICTION</div>
-        <span class='{ml_color}'>{ml_bias}</span>
-        <div style="font-size:0.8em; margin-top:5px; color:#aaa;">CONF: {ml_conf:.0f}%</div>
-    </div>
-    """, unsafe_allow_html=True)
+    # ML SECTION WITH FEATURE IMPORTANCE
+    with c2:
+        st.markdown(f"""
+        <div class='terminal-box' style="text-align:center; padding:5px; margin-bottom:0;">
+            <div style="font-size:0.8em; color:#ff9900;">AI PREDICTION</div>
+            <span class='{ml_color}'>{ml_bias}</span>
+            <div style="font-size:0.8em; color:#aaa;">CONF: {ml_conf:.0f}%</div>
+        </div>
+        """, unsafe_allow_html=True)
+        if not ml_imp.empty:
+            fig_imp = go.Figure(go.Bar(
+                x=ml_imp['Importance'], 
+                y=ml_imp['Feature'], 
+                orientation='h',
+                marker_color='#00e6ff'
+            ))
+            fig_imp.update_layout(
+                height=80, 
+                margin=dict(l=0,r=0,t=0,b=0),
+                paper_bgcolor='rgba(0,0,0,0)',
+                plot_bgcolor='rgba(0,0,0,0)',
+                xaxis=dict(showgrid=False, showticklabels=False),
+                yaxis=dict(showgrid=False, tickfont=dict(color='gray', size=8))
+            )
+            st.plotly_chart(fig_imp, use_container_width=True, config={'displayModeBar': False})
     
     hurst_type = "TRENDING" if hurst > 0.55 else "MEAN REVERT" if hurst < 0.45 else "RANDOM WALK"
     h_color = "#00ff00" if hurst > 0.55 else "#ff3333" if hurst < 0.45 else "gray"
@@ -837,8 +879,15 @@ if not intraday_data.empty and strat_perf:
         fig_perf = go.Figure()
         fig_perf.add_trace(go.Scatter(x=ec_df.index, y=ec_df['Buy & Hold'], name="Buy & Hold", line=dict(color='gray', dash='dot')))
         fig_perf.add_trace(go.Scatter(x=ec_df.index, y=ec_df['Strategy'], name="Active Strat", line=dict(color='#00e6ff', width=2)))
-        terminal_chart_layout(fig_perf, title="STRATEGY EDGE VALIDATION", height=300)
+        terminal_chart_layout(fig_perf, title="STRATEGY EQUITY CURVE", height=250)
         st.plotly_chart(fig_perf, use_container_width=True)
+        
+        # UNDERWATER PLOT (DRAWDOWN)
+        dd = calculate_drawdown(strat_perf['equity_curve'])
+        fig_dd = go.Figure()
+        fig_dd.add_trace(go.Scatter(x=dd.index, y=dd, fill='tozeroy', line=dict(color='#ff3333', width=1), name='Drawdown'))
+        terminal_chart_layout(fig_dd, title="RISK PROFILE (DRAWDOWN)", height=200)
+        st.plotly_chart(fig_dd, use_container_width=True)
 
     with q3:
         if vol_profile is not None:
@@ -846,7 +895,7 @@ if not intraday_data.empty and strat_perf:
             colors = ['#00e6ff' if x == poc_price else '#333' for x in vol_profile['PriceLevel']]
             fig_vp.add_trace(go.Bar(y=vol_profile['PriceLevel'], x=vol_profile['Volume'], orientation='h', marker_color='#ff9900', opacity=0.4))
             fig_vp.add_hline(y=poc_price, line_dash="dash", line_color="yellow", annotation_text="POC")
-            terminal_chart_layout(fig_vp, title="INTRADAY VOLUME PROFILE", height=300)
+            terminal_chart_layout(fig_vp, title="INTRADAY VOLUME PROFILE", height=450)
             st.plotly_chart(fig_vp, use_container_width=True)
 
 # --- 5. VWAP EXECUTION ---
@@ -889,6 +938,12 @@ if gex_df is not None and gex_spot is not None:
         colors = ['#00ff00' if x > 0 else '#ff3333' for x in gex_zoom['gex']]
         fig_gex.add_trace(go.Bar(x=gex_zoom['strike'], y=gex_zoom['gex'], marker_color=colors))
         fig_gex.add_vline(x=center_strike, line_dash="dot", line_color="white", annotation_text="ETF SPOT")
+        
+        # Zero Gamma Flip Point
+        flip_point = find_zero_gamma(gex_df)
+        if flip_point:
+            fig_gex.add_vline(x=flip_point, line_dash="dash", line_color="#ffff00", annotation_text="FLIP LINE")
+        
         terminal_chart_layout(fig_gex, title=f"NET GAMMA PROFILE (EXP: {gex_date})")
         st.plotly_chart(fig_gex, use_container_width=True)
         
@@ -918,10 +973,8 @@ st.markdown("---")
 st.markdown("### 🎲 SIMULATION & TIME ANALYSIS")
 
 pred_dates, pred_paths = generate_monte_carlo(daily_data)
-# Pass ticker to updated function for Hourly Data fetch
 stats = get_seasonality_stats(daily_data, asset_info['ticker']) 
 
-# --- 1. SEASONALITY TABS (NOW FULL WIDTH & ON TOP) ---
 if stats:
     st.markdown("#### ⏳ SEASONAL TENDENCIES")
     tab_hour, tab_day, tab_week = st.tabs(["HOUR (NY)", "DAY", "WEEK"])
@@ -954,8 +1007,6 @@ if stats:
             st.plotly_chart(fig_w, use_container_width=True)
 
 st.markdown("---")
-
-# --- 2. MONTE CARLO (NOW FULL WIDTH & BELOW) ---
 st.markdown("#### 🎲 MONTE CARLO PROJECTION")
 fig_pred = go.Figure()
 hist_slice = daily_data['Close'].tail(90)
@@ -979,6 +1030,8 @@ if cot_data:
         <div style='font-size:0.7em;'>Date: {cot_data['date']}</div>
     </div>
     """, unsafe_allow_html=True)
+elif COT_AVAILABLE is False:
+    st.warning("COT Data Library not found. Install 'cot-reports' to enable Smart Money tracking.")
 
 # --- 9. CONCLUSION ---
 st.markdown("---")
