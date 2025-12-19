@@ -86,55 +86,37 @@ def get_news(api_key, query):
 
 @st.cache_data(ttl=86400)
 def get_macro_regime_data(api_key):
-    """
-    CONCEPT: Macro Regime via Real Rates
-    Logic: Fed Funds Rate (Cost) vs CPI (Inflation).
-    """
     if not api_key: return None
     try:
         fred = Fred(api_key=api_key)
-        # 1. Fed Funds Rate
         ffr = fred.get_series('FEDFUNDS').iloc[-1]
-        # 2. CPI YoY
-        cpi_series = fred.get_series('CPIAUCSL').pct_change(12) * 100
-        cpi = cpi_series.iloc[-1]
-        
+        cpi = fred.get_series('CPIAUCSL').pct_change(12).iloc[-1] * 100
         real_rate = ffr - cpi
-        bias = "BULLISH" if real_rate < 0.5 else "BEARISH" # Threshold for risk-on
-        
+        bias = "BULLISH" if real_rate < 0.5 else "BEARISH"
         return {"ffr": ffr, "cpi": cpi, "real_rate": real_rate, "bias": bias}
     except Exception:
         return None
 
 @st.cache_data(ttl=300)
 def calculate_volatility_permission(ticker):
-    """
-    CONCEPT: GARCH-style Volatility Forecasting
-    Logic: Log-True Range EWMA vs Baseline
-    """
     try:
         df = yf.download(ticker, period="1y", interval="1d", progress=False)
         if df.empty: return None
         
-        # Handle MultiIndex
         if isinstance(df.columns, pd.MultiIndex):
             high, low, close = df['High'].iloc[:, 0], df['Low'].iloc[:, 0], df['Close'].iloc[:, 0]
         else:
             high, low, close = df['High'], df['Low'], df['Close']
             
-        # Calculate True Range %
         prev_close = close.shift(1)
         tr = pd.concat([high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
         tr_pct = (tr / close) * 100
         tr_pct = tr_pct.dropna()
         
-        # Log Transform & EWMA (GARCH Proxy)
         log_tr = np.log(tr_pct)
-        # alpha=0.94 simulates volatility persistence
         forecast_log = log_tr.ewm(alpha=0.94).mean().iloc[-1]
         forecast_tr = np.exp(forecast_log)
         
-        # Baseline (20d MA)
         baseline_series = tr_pct.rolling(20).mean()
         baseline = baseline_series.iloc[-1]
         
@@ -150,41 +132,76 @@ def calculate_volatility_permission(ticker):
 
 @st.cache_data(ttl=3600)
 def get_options_pdf(opt_ticker):
-    """
-    CONCEPT: Options-Implied Probability (Breeden-Litzenberger)
-    Logic: 2nd Derivative of Call Prices = PDF
-    """
     try:
         tk = yf.Ticker(opt_ticker)
         exps = tk.options
         if len(exps) < 2: return None
-        target_exp = exps[1] # Use next monthly expiry usually
+        target_exp = exps[1] 
         
         chain = tk.option_chain(target_exp)
         calls = chain.calls
         
-        # Filter for liquidity
         calls = calls[(calls['volume'] > 10) & (calls['openInterest'] > 50)]
         if calls.empty: return None
         
-        # Midpoint Price
         calls['mid'] = (calls['bid'] + calls['ask']) / 2
         calls['price'] = np.where((calls['bid']==0), calls['lastPrice'], calls['mid'])
         
         df = calls[['strike', 'price']].sort_values('strike')
         
-        # Spline Fit & Differentiation
         spline = UnivariateSpline(df['strike'], df['price'], k=4, s=len(df)*2)
         strikes_smooth = np.linspace(df['strike'].min(), df['strike'].max(), 200)
         
-        # 2nd Derivative
         pdf = spline.derivative(n=2)(strikes_smooth)
-        pdf = np.maximum(pdf, 0) # Remove negatives
+        pdf = np.maximum(pdf, 0)
         
         peak_price = strikes_smooth[np.argmax(pdf)]
         
         return {"strikes": strikes_smooth, "pdf": pdf, "peak": peak_price, "date": target_exp}
     except: return None
+
+# --- NEW: SEASONALITY FUNCTION ---
+@st.cache_data(ttl=3600)
+def get_day_of_week_stats(daily_data):
+    """Calculates frequency of Weekly Highs/Lows by Day of Week"""
+    try:
+        df = daily_data.copy()
+        
+        # Handle MultiIndex
+        if isinstance(df.columns, pd.MultiIndex):
+            df = df.droplevel(1, axis=1) # Flatten if needed for simple access
+            
+        # Add Week Identifier and Day Name
+        df['Week_Num'] = df.index.to_period('W')
+        df['Day_Name'] = df.index.day_name()
+        
+        # Filter incomplete weeks (counts must be > 1 to be a valid week)
+        valid_weeks = df['Week_Num'].value_counts()
+        valid_weeks = valid_weeks[valid_weeks >= 2].index
+        df = df[df['Week_Num'].isin(valid_weeks)]
+        
+        # Find Day of Weekly High and Low
+        weekly_groups = df.groupby('Week_Num')
+        
+        # Get the Day Name where the Max High occurred for each week
+        high_days = df.loc[weekly_groups['High'].idxmax()]['Day_Name']
+        
+        # Get the Day Name where the Min Low occurred for each week
+        low_days = df.loc[weekly_groups['Low'].idxmin()]['Day_Name']
+        
+        # Count frequencies
+        days_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']
+        high_counts = high_days.value_counts().reindex(days_order, fill_value=0)
+        low_counts = low_days.value_counts().reindex(days_order, fill_value=0)
+        
+        # Normalize to Percentages
+        total_weeks = len(high_days)
+        high_pct = (high_counts / total_weeks) * 100
+        low_pct = (low_counts / total_weeks) * 100
+        
+        return high_pct, low_pct, total_weeks
+    except Exception as e:
+        return None, None, 0
 
 # --- TECHNICAL CALCULATIONS ---
 
@@ -268,18 +285,16 @@ if not daily_data.empty:
     curr = close.iloc[-1]
     pct = ((curr - close.iloc[-2]) / close.iloc[-2]) * 100
     
-    # Header Metrics
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Price", f"{curr:,.2f}", f"{pct:.2f}%")
     c2.metric("High", f"{high.max():,.2f}")
     c3.metric("Low", f"{low.min():,.2f}")
     
-    # Macro Regime Badge
     if macro_regime:
         bias_color = "bullish" if macro_regime['bias'] == "BULLISH" else "bearish"
         c4.markdown(f"""
         <div style="text-align:center; padding:5px;">
-            <div style="font-size:0.8em; color:gray;">Macro Regime (Real Rates)</div>
+            <div style="font-size:0.8em; color:gray;">Macro Regime</div>
             <span class='{bias_color}'>{macro_regime['bias']}</span>
             <div style="font-size:0.8em;">{macro_regime['real_rate']:.2f}%</div>
         </div>
@@ -287,7 +302,6 @@ if not daily_data.empty:
     else:
         c4.metric("Vol", f"{(close.pct_change().std()* (252**0.5)*100):.2f}%")
 
-    # Main Price Chart
     fig = go.Figure()
     fig.add_trace(go.Candlestick(x=daily_data.index, open=open_p, high=high, low=low, close=close, name="Price"))
     fig.update_layout(height=400, template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', xaxis_rangeslider_visible=False)
@@ -298,77 +312,28 @@ st.markdown("---")
 st.subheader("⚡ Intraday & Volatility Permissions")
 
 if not intraday_data.empty and vol_forecast:
-    # --- VOLATILITY VISUALIZATION ---
     v1, v2 = st.columns([1, 3])
-    
     with v1:
         st.markdown("**Daily Volatility Filter**")
         badge_class = "vol-go" if vol_forecast['is_go'] else "vol-stop"
         st.markdown(f"<span class='{badge_class}'>{vol_forecast['signal']}</span>", unsafe_allow_html=True)
-        
-        st.markdown(f"""
-        <div style="margin-top: 10px; font-size: 0.9em;">
-            <strong>Expected TR:</strong> {vol_forecast['forecast']:.2f}%<br>
-            <span style="color: gray;">Baseline (20d): {vol_forecast['baseline']:.2f}%</span>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        delta = vol_forecast['forecast'] - vol_forecast['baseline']
-        d_color = "green" if delta > 0 else "red"
-        st.markdown(f"Regime Delta: <span style='color:{d_color}'>{delta:+.2f}%</span>", unsafe_allow_html=True)
+        st.markdown(f"<div style='font-size:0.9em; margin-top:5px;'>Expected: {vol_forecast['forecast']:.2f}%<br><span style='color:gray'>Base: {vol_forecast['baseline']:.2f}%</span></div>", unsafe_allow_html=True)
 
     with v2:
-        # Prepare Data for Plotting
         hist_tr = vol_forecast['history'].tail(40)
         hist_base = vol_forecast['baseline_history'].tail(40)
-        
-        # Create Composite Chart
         fig_vol = go.Figure()
+        fig_vol.add_trace(go.Bar(x=hist_tr.index, y=hist_tr.values, name="Realized TR%", marker_color='#333333'))
+        fig_vol.add_trace(go.Scatter(x=hist_base.index, y=hist_base.values, name="Baseline", line=dict(color='gray', dash='dot')))
         
-        # 1. Historical Realized Volatility
-        fig_vol.add_trace(go.Bar(
-            x=hist_tr.index, 
-            y=hist_tr.values,
-            name="Realized TR%",
-            marker_color='#333333'
-        ))
-        
-        # 2. Baseline Threshold
-        fig_vol.add_trace(go.Scatter(
-            x=hist_base.index,
-            y=hist_base.values,
-            name="Baseline (20d)",
-            line=dict(color='gray', dash='dot', width=2)
-        ))
-        
-        # 3. Forecast Bar
         next_day = hist_tr.index[-1] + timedelta(days=1)
         f_color = '#00ff00' if vol_forecast['is_go'] else '#ff4b4b'
-        
-        fig_vol.add_trace(go.Bar(
-            x=[next_day],
-            y=[vol_forecast['forecast']],
-            name="Expected TR% (Forecast)",
-            marker_color=f_color,
-            text=[f"{vol_forecast['forecast']:.2f}%"],
-            textposition='auto'
-        ))
+        fig_vol.add_trace(go.Bar(x=[next_day], y=[vol_forecast['forecast']], name="Forecast", marker_color=f_color))
 
-        fig_vol.update_layout(
-            title="Volatility Regime: Realized vs. Expected True Range",
-            yaxis_title="True Range %",
-            template="plotly_dark",
-            height=300,
-            margin=dict(l=20, r=20, t=40, b=20),
-            paper_bgcolor='rgba(0,0,0,0)',
-            plot_bgcolor='rgba(0,0,0,0)',
-            showlegend=True,
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-        )
+        fig_vol.update_layout(title="Volatility Regime", yaxis_title="True Range %", template="plotly_dark", height=250, margin=dict(l=20, r=20, t=30, b=20), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
         st.plotly_chart(fig_vol, use_container_width=True)
 
-    # --- INTRADAY METRICS ---
-    st.markdown("##### ⏱️ Intraday Momentum")
+    # Intraday Metrics
     if isinstance(intraday_data.columns, pd.MultiIndex): i_close = intraday_data['Close'].iloc[:, 0]; i_vol = intraday_data['Volume'].iloc[:, 0]
     else: i_close = intraday_data['Close']; i_vol = intraday_data['Volume']
     
@@ -376,65 +341,102 @@ if not intraday_data.empty and vol_forecast:
                                          'Low': intraday_data['Low'].iloc[:,0] if isinstance(intraday_data.columns, pd.MultiIndex) else intraday_data['Low'], 
                                          'Close': i_close, 'Volume': i_vol}))
     current_vwap = df_vwap['VWAP'].iloc[-1]
-    rsi_val = calculate_rsi(i_close).iloc[-1]
     
     col_dash1, col_dash2, col_dash3 = st.columns(3)
-    with col_dash1:
-        bias = "BULLISH" if i_close.iloc[-1] > current_vwap else "BEARISH"
-        st.metric("VWAP Bias", bias, f"RSI: {rsi_val:.1f}")
-    with col_dash2:
-        st.metric("Volume Trend", "Rising" if i_vol.tail(3).mean() > i_vol.mean() else "Falling")
-    with col_dash3:
-        st.metric("Gap %", f"{((open_p.iloc[-1] - close.iloc[-2])/close.iloc[-2]*100):.2f}%")
+    with col_dash1: st.metric("VWAP Bias", "BULLISH" if i_close.iloc[-1] > current_vwap else "BEARISH")
+    with col_dash2: st.metric("Volume Trend", "Rising" if i_vol.tail(3).mean() > i_vol.mean() else "Falling")
+    with col_dash3: st.metric("Gap %", f"{((open_p.iloc[-1] - close.iloc[-2])/close.iloc[-2]*100):.2f}%")
 
-# --- 3. OPTIONS HEATMAP ---
+# --- 3. [NEW] SEASONALITY SECTION ---
 st.markdown("---")
-st.subheader("🏦 Institutional Expectations (Options Market)")
+st.subheader("📅 Day-of-Week Seasonality Stats")
+
+high_pct, low_pct, total_weeks = get_day_of_week_stats(daily_data)
+
+if high_pct is not None:
+    s_col1, s_col2 = st.columns([3, 1])
+    
+    with s_col1:
+        # Clustered Bar Chart
+        fig_season = go.Figure()
+        
+        # Series 1: Highs (Green)
+        fig_season.add_trace(go.Bar(
+            x=high_pct.index, 
+            y=high_pct.values, 
+            name='Weekly High Occurs',
+            marker_color='#00ff00',
+            opacity=0.7
+        ))
+        
+        # Series 2: Lows (Red)
+        fig_season.add_trace(go.Bar(
+            x=low_pct.index, 
+            y=low_pct.values, 
+            name='Weekly Low Occurs',
+            marker_color='#ff4b4b',
+            opacity=0.7
+        ))
+
+        fig_season.update_layout(
+            title=f"Distribution of Weekly Extremes (Last {total_weeks} Weeks)",
+            yaxis_title="Frequency (%)",
+            barmode='group', # Cluster the bars
+            template="plotly_dark",
+            height=350,
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(0,0,0,0)'
+        )
+        st.plotly_chart(fig_season, use_container_width=True)
+        
+    with s_col2:
+        st.info("**What this shows:**\n\nThis analyzes on which Day of the Week the **High** or **Low** of the entire week typically lands.")
+        
+        # Identify Key patterns
+        most_common_high = high_pct.idxmax()
+        most_common_low = low_pct.idxmax()
+        
+        st.markdown(f"**Dominant High Day:**\n\n`{most_common_high}` ({high_pct.max():.1f}%)")
+        st.markdown(f"**Dominant Low Day:**\n\n`{most_common_low}` ({low_pct.max():.1f}%)")
+        
+        if most_common_low in ['Monday', 'Tuesday'] and most_common_high in ['Thursday', 'Friday']:
+            st.markdown("---")
+            st.success("Pattern: **Classic Trend Week** (Low early, High late)")
+
+# --- 4. OPTIONS HEATMAP ---
+st.markdown("---")
+st.subheader("🏦 Institutional Expectations")
 if options_pdf:
     op_col1, op_col2 = st.columns([3, 1])
     with op_col1:
         fig_opt = go.Figure()
         fig_opt.add_trace(go.Scatter(x=options_pdf['strikes'], y=options_pdf['pdf'], fill='tozeroy', name='Implied Prob', line=dict(color='#00d4ff')))
-        fig_opt.add_vline(x=curr, line_dash="dot", annotation_text="Spot Price")
-        fig_opt.add_vline(x=options_pdf['peak'], line_dash="dash", line_color="#d4af37", annotation_text="Mkt Expectation")
+        fig_opt.add_vline(x=curr, line_dash="dot", annotation_text="Spot")
+        fig_opt.add_vline(x=options_pdf['peak'], line_dash="dash", line_color="#d4af37", annotation_text="Expected")
         fig_opt.update_layout(template="plotly_dark", height=350, title=f"Probability Distribution (Exp: {options_pdf['date']})", paper_bgcolor='rgba(0,0,0,0)')
         st.plotly_chart(fig_opt, use_container_width=True)
     with op_col2:
         st.markdown(f"**Market Center:** `${options_pdf['peak']:.2f}`")
-        skew = "Bullish" if options_pdf['peak'] > curr else "Bearish"
-        st.markdown(f"**Skew:** `{skew}`")
-        st.caption("Calculated via Breeden-Litzenberger (2nd derivative of call prices).")
-else:
-    st.warning("Options data unavailable for this asset (or market closed).")
+        st.markdown(f"**Skew:** `{'Bullish' if options_pdf['peak'] > curr else 'Bearish'}`")
 
-# --- 4. PREDICTION ---
+# --- 5. PREDICTION & CONTEXT ---
 st.markdown("---")
-st.subheader("🔮 6-Month Projection (Monte Carlo)")
+st.subheader("🔮 6-Month Projection & Global Context")
 if not daily_data.empty:
     pred_dates, pred_paths = generate_monte_carlo(daily_data)
-    fig_pred = go.Figure()
-    hist_slice = close.tail(90)
-    fig_pred.add_trace(go.Scatter(x=hist_slice.index, y=hist_slice.values, name='History', line=dict(color='white')))
-    fig_pred.add_trace(go.Scatter(x=pred_dates, y=np.mean(pred_paths, axis=1), name='Avg Path', line=dict(color='#00ff00', dash='dash')))
-    for i in range(50): fig_pred.add_trace(go.Scatter(x=pred_dates, y=pred_paths[:, i], mode='lines', line=dict(color='cyan', width=1), opacity=0.05, showlegend=False))
-    fig_pred.update_layout(height=400, template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
-    st.plotly_chart(fig_pred, use_container_width=True)
-
-# --- 5. CORRELATIONS & SENTIMENT ---
-st.markdown("---")
-st.subheader("🌐 Global Context & News")
-corr_data = get_correlation_data()
-c1, c2 = st.columns(2)
-with c1:
-    if not corr_data.empty:
-        fig_heat = px.imshow(corr_data.corr(), text_auto=True, color_continuous_scale='RdBu_r', aspect="auto")
-        fig_heat.update_layout(template="plotly_dark", height=350, paper_bgcolor='rgba(0,0,0,0)')
-        st.plotly_chart(fig_heat, use_container_width=True)
-with c2:
-    if news_key:
-        news_data = get_news(news_key, asset_info['news_query'])
-        if google_key and isinstance(news_data, list):
-            s = get_ai_sentiment(google_key, selected_asset, news_data)
-            if s: st.markdown(f"<div class='sentiment-box'><strong>🤖 AI Sentiment:</strong> {s}</div>", unsafe_allow_html=True)
-        if isinstance(news_data, list):
-            for a in news_data[:3]: st.markdown(f"- [{a['title']}]({a['url']})")
+    
+    pc1, pc2 = st.columns(2)
+    with pc1:
+        fig_pred = go.Figure()
+        hist_slice = close.tail(90)
+        fig_pred.add_trace(go.Scatter(x=hist_slice.index, y=hist_slice.values, name='History', line=dict(color='white')))
+        fig_pred.add_trace(go.Scatter(x=pred_dates, y=np.mean(pred_paths, axis=1), name='Avg Path', line=dict(color='#00ff00', dash='dash')))
+        fig_pred.update_layout(height=350, template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', title="Monte Carlo Drift")
+        st.plotly_chart(fig_pred, use_container_width=True)
+    
+    with pc2:
+        corr_data = get_correlation_data()
+        if not corr_data.empty:
+            fig_heat = px.imshow(corr_data.corr(), text_auto=True, color_continuous_scale='RdBu_r', aspect="auto")
+            fig_heat.update_layout(template="plotly_dark", height=350, paper_bgcolor='rgba(0,0,0,0)', title="Asset Correlations")
+            st.plotly_chart(fig_heat, use_container_width=True)
