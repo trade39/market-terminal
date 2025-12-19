@@ -282,6 +282,13 @@ def get_seasonality_stats(daily_data):
 
 def calculate_vwap(df):
     if df.empty: return df
+    
+    # --- FIX: Handle MultiIndex columns from yfinance ---
+    if isinstance(df.columns, pd.MultiIndex):
+        df = df.copy()
+        # Drop the Ticker level so columns become just ['High', 'Low', 'Close'...]
+        df.columns = df.columns.droplevel(1)
+        
     df['TP'] = (df['High'] + df['Low'] + df['Close']) / 3
     df['TPV'] = df['TP'] * df['Volume']
     df['VWAP'] = df['TPV'].cumsum() / df['Volume'].cumsum()
