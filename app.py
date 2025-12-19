@@ -11,7 +11,7 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.mixture import GaussianMixture
 
 # --- APP CONFIGURATION ---
-st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V3.3", page_icon="💹")
+st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V3.4", page_icon="💹")
 
 # --- BLOOMBERG TERMINAL STYLING (CSS) ---
 st.markdown("""
@@ -53,10 +53,6 @@ st.markdown("""
     /* News Link */
     .news-link { color: #00e6ff; text-decoration: none; font-size: 0.9em; }
     .news-link:hover { text-decoration: underline; color: #ff9900; }
-
-    /* Volatility Badges */
-    .vol-go { border: 1px solid #00ff00; color: #00ff00; padding: 2px 8px; font-weight: bold; letter-spacing: 1px; }
-    .vol-stop { border: 1px solid #ff3333; color: #ff3333; padding: 2px 8px; font-weight: bold; letter-spacing: 1px; }
 
     /* UI Elements */
     .stSelectbox > div > div { border-radius: 0px; background-color: #111; color: white; border: 1px solid #444; }
@@ -165,8 +161,7 @@ def get_ml_prediction(ticker):
         return model, prob_up
     except: return None, 0.5
 
-# --- 3. UPDATED GAMMA EXPOSURE ENGINE ---
-
+# --- 3. GAMMA EXPOSURE ENGINE ---
 def calculate_black_scholes_gamma(S, K, T, r, sigma):
     if T <= 0 or sigma <= 0: return 0
     d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
@@ -231,15 +226,49 @@ def calculate_volume_profile(df, bins=50):
     poc_price = vol_profile.loc[poc_idx, 'PriceLevel']
     return vol_profile, poc_price
 
-# --- 5. MONTE CARLO & SEASONALITY ---
+# --- 5. MONTE CARLO & ADVANCED SEASONALITY (UPDATED) ---
 @st.cache_data(ttl=3600)
-def get_seasonality_stats(daily_data):
+def get_seasonality_stats(daily_data, ticker_name):
+    stats = {}
     try:
+        # 1. Day of Week Stats
         df = daily_data.copy()
         df['Week_Num'] = df.index.to_period('W')
         high_days = df.groupby('Week_Num')['High'].idxmax().apply(lambda x: df.loc[x].name.day_name())
         days_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']
-        return {'day_high': high_days.value_counts().reindex(days_order, fill_value=0) / len(high_days) * 100}
+        stats['day_high'] = high_days.value_counts().reindex(days_order, fill_value=0) / len(high_days) * 100
+
+        # 2. Week of Month Stats
+        df['Day'] = df.index.day
+        df['Month_Week'] = np.ceil(df['Day'] / 7).astype(int)
+        df['Returns'] = df['Close'].pct_change()
+        week_stats = df.groupby('Month_Week')['Returns'].mean() * 100
+        stats['week_returns'] = week_stats
+
+        # 3. Hourly Stats (Specific Windows - New York Time)
+        try:
+            # Fetch 60 days of 1h data
+            intra = yf.download(ticker_name, period="60d", interval="1h", progress=False)
+            intra = flatten_dataframe(intra)
+            
+            if not intra.empty:
+                # Convert to NY Time
+                if intra.index.tz is None:
+                    intra.index = intra.index.tz_localize('UTC')
+                intra.index = intra.index.tz_convert('America/New_York')
+                
+                intra['Hour'] = intra.index.hour
+                intra['Return'] = intra['Close'].pct_change()
+                
+                # Requested windows: 2-6am, 8-11am, 2pm(14)-6pm(18), 8pm(20)-11pm(23)
+                target_hours = [2,3,4,5,6, 8,9,10,11, 14,15,16,17,18, 20,21,22,23]
+                
+                hourly_perf = intra[intra['Hour'].isin(target_hours)].groupby('Hour')['Return'].mean() * 100
+                stats['hourly_perf'] = hourly_perf
+        except Exception:
+            stats['hourly_perf'] = None
+            
+        return stats
     except: return None
 
 @st.cache_data(ttl=3600)
@@ -333,7 +362,7 @@ def get_economic_calendar(api_key):
         return filtered_events
     except: return []
 
-# --- 7. NEW INSTITUTIONAL FEATURES ---
+# --- 7. INSTITUTIONAL FEATURES ---
 
 # A. BACKTEST ENGINE
 @st.cache_data(ttl=300)
@@ -374,7 +403,7 @@ def run_strategy_backtest(ticker):
     except Exception as e:
         return None
 
-# B. UPDATED: SESSION ANCHORED VWAP (RESET DAILY)
+# B. SESSION ANCHORED VWAP
 def calculate_vwap_bands(df):
     if df.empty: return df
     df = df.copy()
@@ -383,16 +412,14 @@ def calculate_vwap_bands(df):
     df['TP'] = (df['High'] + df['Low'] + df['Close']) / 3
     df['VP'] = df['TP'] * df['Volume']
     
-    # --- CRITICAL UPDATE: Group by Date to reset VWAP daily ---
+    # Group by Date to reset VWAP daily
     df['Date'] = df.index.date
     
-    # Cumulative Sums reset daily
     df['Cum_VP'] = df.groupby('Date')['VP'].cumsum()
     df['Cum_Vol'] = df.groupby('Date')['Volume'].cumsum()
     
     df['VWAP'] = df['Cum_VP'] / df['Cum_Vol']
     
-    # Variance Bands
     df['Sq_Dist'] = df['Volume'] * (df['TP'] - df['VWAP'])**2
     df['Cum_Sq_Dist'] = df.groupby('Date')['Sq_Dist'].cumsum()
     df['Std_Dev'] = np.sqrt(df['Cum_Sq_Dist'] / df['Cum_Vol'])
@@ -404,7 +431,7 @@ def calculate_vwap_bands(df):
     
     return df
 
-# C. NEW: INTRADAY RELATIVE STRENGTH
+# C. INTRADAY RELATIVE STRENGTH
 @st.cache_data(ttl=60)
 def get_relative_strength(asset_ticker, benchmark_ticker="SPY"):
     try:
@@ -434,11 +461,9 @@ def get_relative_strength(asset_ticker, benchmark_ticker="SPY"):
         return session_data
     except: return pd.DataFrame()
 
-# D. NEW: FLOOR TRADER LEVELS
+# D. FLOOR TRADER LEVELS
 def get_key_levels(daily_df):
     if daily_df.empty: return {}
-    
-    # Use -2 because -1 is the current unfinished day
     try:
         last_complete_day = daily_df.iloc[-2]
     except:
@@ -453,12 +478,7 @@ def get_key_levels(daily_df):
     s1 = (2 * pivot) - high
     
     return {
-        "PDH": high,
-        "PDL": low,
-        "PDC": close,
-        "Pivot": pivot,
-        "R1": r1,
-        "S1": s1
+        "PDH": high, "PDL": low, "PDC": close, "Pivot": pivot, "R1": r1, "S1": s1
     }
 
 # E. MACRO CORRELATIONS
@@ -543,7 +563,7 @@ with st.sidebar:
     if st.button(">> REFRESH DATA"): st.cache_data.clear()
 
 # --- MAIN DASHBOARD ---
-st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V3.3 (INTRADAY)</span></h1>", unsafe_allow_html=True)
+st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V3.4</span></h1>", unsafe_allow_html=True)
 
 # Fetch Data
 daily_data = get_daily_data(asset_info['ticker'])
@@ -606,7 +626,7 @@ if not daily_data.empty:
     fig.update_xaxes(rangeslider_visible=False)
     st.plotly_chart(fig, use_container_width=True)
 
-# --- 2. INTRADAY TACTICAL FEED (NEW) ---
+# --- 2. INTRADAY TACTICAL FEED ---
 st.markdown("---")
 st.markdown("### 🔭 INTRADAY TACTICAL FEED")
 
@@ -709,7 +729,6 @@ with col_news:
 st.markdown("---")
 st.markdown("### ⚡ QUANTITATIVE RISK & EXECUTION")
 
-# Run the Backtest
 strat_perf = run_strategy_backtest(asset_info['ticker'])
 
 if not intraday_data.empty and strat_perf:
@@ -727,7 +746,7 @@ if not intraday_data.empty and strat_perf:
         st.metric("Sharpe Ratio", f"{strat_perf['sharpe']:.2f}")
 
     with q2:
-        # Plot Equity Curve vs Buy & Hold
+        # Equity Curve
         ec_df = pd.DataFrame({
             "Strategy": strat_perf['equity_curve'],
             "Buy & Hold": strat_perf['df']['Cum_BnH']
@@ -747,7 +766,7 @@ if not intraday_data.empty and strat_perf:
             terminal_chart_layout(fig_vp, title="INTRADAY VOLUME PROFILE", height=300)
             st.plotly_chart(fig_vp, use_container_width=True)
 
-# --- 5. VWAP EXECUTION (UPDATED) ---
+# --- 5. VWAP EXECUTION ---
 st.markdown("#### 🎯 SESSION VWAP + KEY LEVELS")
 vwap_df = calculate_vwap_bands(intraday_data)
 
@@ -763,7 +782,7 @@ if not vwap_df.empty:
     fig_vwap.add_trace(go.Scatter(x=vwap_df.index, y=vwap_df['Upper_Band_1'], name="+1 STD", line=dict(color='gray', width=1), opacity=0.3))
     fig_vwap.add_trace(go.Scatter(x=vwap_df.index, y=vwap_df['Lower_Band_1'], name="-1 STD", line=dict(color='gray', width=1), opacity=0.3))
     
-    # 3. Add Key Levels as Horizontal Lines
+    # 3. Key Levels
     if key_levels:
         fig_vwap.add_hline(y=key_levels['PDH'], line_dash="dot", line_color="#ff3333", annotation_text="PDH")
         fig_vwap.add_hline(y=key_levels['PDL'], line_dash="dot", line_color="#00ff00", annotation_text="PDL")
@@ -772,7 +791,6 @@ if not vwap_df.empty:
     terminal_chart_layout(fig_vwap, height=500)
     st.plotly_chart(fig_vwap, use_container_width=True)
 
-
 # --- 6. GEX ---
 st.markdown("---")
 st.markdown("### 🏦 INSTITUTIONAL GAMMA EXPOSURE (GEX)")
@@ -780,7 +798,6 @@ st.markdown("### 🏦 INSTITUTIONAL GAMMA EXPOSURE (GEX)")
 if gex_df is not None and gex_spot is not None:
     g1, g2 = st.columns([3, 1])
     with g1:
-        # Use the Internal Spot Price for chart centering
         center_strike = gex_spot 
         gex_zoom = gex_df[(gex_df['strike'] > center_strike * 0.9) & (gex_df['strike'] < center_strike * 1.1)]
         
@@ -812,27 +829,54 @@ else:
     else:
         st.warning("GEX CALCULATION SKIPPED: NO OPTIONS CHAIN FOUND OR LIQUIDITY TOO LOW.")
 
-# --- 7. MONTE CARLO & SEASONALITY ---
+# --- 7. MONTE CARLO & ADVANCED SEASONALITY ---
 st.markdown("---")
-st.markdown("### 🎲 SIMULATION & SEASONALITY")
-s1, s2 = st.columns(2)
+st.markdown("### 🎲 SIMULATION & TIME ANALYSIS")
+
+pred_dates, pred_paths = generate_monte_carlo(daily_data)
+# Pass ticker to updated function for Hourly Data fetch
+stats = get_seasonality_stats(daily_data, asset_info['ticker']) 
+
+s1, s2 = st.columns([2, 1])
 
 with s1:
-    pred_dates, pred_paths = generate_monte_carlo(daily_data)
     fig_pred = go.Figure()
     hist_slice = daily_data['Close'].tail(90)
     fig_pred.add_trace(go.Scatter(x=hist_slice.index, y=hist_slice.values, name='History', line=dict(color='white')))
     fig_pred.add_trace(go.Scatter(x=pred_dates, y=np.mean(pred_paths, axis=1), name='Avg Path', line=dict(color='#ff9900', dash='dash')))
-    terminal_chart_layout(fig_pred, title="MONTE CARLO PROJECTION")
+    terminal_chart_layout(fig_pred, title="MONTE CARLO PROJECTION (126 Days)")
     st.plotly_chart(fig_pred, use_container_width=True)
 
 with s2:
-    stats = get_seasonality_stats(daily_data)
     if stats:
-        fig_d = go.Figure()
-        fig_d.add_trace(go.Bar(x=stats['day_high'].index, y=stats['day_high'].values, marker_color='#00ff00'))
-        terminal_chart_layout(fig_d, title="PROBABILITY OF WEEKLY HIGH")
-        st.plotly_chart(fig_d, use_container_width=True)
+        tab_day, tab_week, tab_hour = st.tabs(["DAY", "WEEK", "HOUR (NY)"])
+        
+        with tab_day:
+            fig_d = go.Figure()
+            fig_d.add_trace(go.Bar(x=stats['day_high'].index, y=stats['day_high'].values, marker_color='#00ff00'))
+            terminal_chart_layout(fig_d, title="PROBABILITY OF WEEKLY HIGH", height=250)
+            st.plotly_chart(fig_d, use_container_width=True)
+            
+        with tab_week:
+            if 'week_returns' in stats:
+                wr = stats['week_returns']
+                fig_w = go.Figure()
+                colors = ['#00ff00' if v > 0 else '#ff3333' for v in wr.values]
+                fig_w.add_trace(go.Bar(x=["Wk 1", "Wk 2", "Wk 3", "Wk 4", "Wk 5"], y=wr.values, marker_color=colors))
+                terminal_chart_layout(fig_w, title="AVG RETURN BY WEEK OF MONTH", height=250)
+                st.plotly_chart(fig_w, use_container_width=True)
+                
+        with tab_hour:
+            if 'hourly_perf' in stats and stats['hourly_perf'] is not None:
+                hp = stats['hourly_perf']
+                fig_h = go.Figure()
+                hour_labels = [f"{h:02d}:00" for h in hp.index]
+                colors = ['#00ff00' if v > 0 else '#ff3333' for v in hp.values]
+                fig_h.add_trace(go.Bar(x=hour_labels, y=hp.values, marker_color=colors))
+                terminal_chart_layout(fig_h, title="AVG RETURN (NY TIME)", height=250)
+                st.plotly_chart(fig_h, use_container_width=True)
+            else:
+                st.info("Hourly data insufficient.")
 
 # --- 8. CONCLUSION ---
 st.markdown("---")
