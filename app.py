@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
+import requests  # <--- Added for API
 from fredapi import Fred
 from newsapi import NewsApiClient
 import google.generativeai as genai
@@ -29,6 +30,11 @@ st.markdown("""
     /* Volatility Badges */
     .vol-go { background-color: rgba(0, 255, 0, 0.2); color: #00ff00; padding: 4px 10px; border-radius: 4px; font-weight: bold; border: 1px solid #00ff00; }
     .vol-stop { background-color: rgba(255, 75, 75, 0.2); color: #ff4b4b; padding: 4px 10px; border-radius: 4px; font-weight: bold; border: 1px solid #ff4b4b; }
+    
+    /* Calendar Impact */
+    .impact-high { color: #ff4b4b; font-weight: bold; }
+    .impact-med { color: #d4af37; font-weight: bold; }
+    .impact-low { color: #cccccc; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -46,7 +52,6 @@ DXY_TICKER = "DX-Y.NYB"
 # --- HELPER FUNCTIONS ---
 
 def get_api_key(key_name):
-    """Retrieve API keys from secrets.toml"""
     if "api_keys" in st.secrets and key_name in st.secrets["api_keys"]:
         return st.secrets["api_keys"][key_name]
     if key_name in st.secrets:
@@ -81,6 +86,45 @@ def get_news(api_key, query):
         return articles['articles']
     except Exception as e:
         return f"Error: {str(e)}"
+
+# --- NEW: ECONOMIC CALENDAR FUNCTION ---
+@st.cache_data(ttl=3600)
+def get_economic_calendar(api_key):
+    """Fetches Economic Calendar from RapidAPI for TODAY"""
+    if not api_key: return None
+    
+    url = "https://forex-factory-scraper1.p.rapidapi.com/get_calendar_details"
+    
+    # Dynamic Date (Today)
+    now = datetime.now()
+    
+    querystring = {
+        "year": str(now.year),
+        "month": str(now.month),
+        "day": str(now.day),
+        "currency": "USD", # Filter for USD primarily for US assets
+        "event_name": "ALL",
+        "timezone": "GMT-05:00 Eastern Time (US & Canada)", # Standard Market Time
+        "time_format": "12h"
+    }
+    
+    headers = {
+        "x-rapidapi-host": "forex-factory-scraper1.p.rapidapi.com",
+        "x-rapidapi-key": api_key
+    }
+    
+    try:
+        response = requests.get(url, headers=headers, params=querystring)
+        data = response.json()
+        
+        # Depending on API structure, ensure it returns a list
+        if isinstance(data, list):
+            return data
+        elif 'data' in data:
+            return data['data']
+        return []
+    except Exception as e:
+        return []
 
 # --- INSTITUTIONAL ALGORITHMS ---
 
@@ -137,71 +181,42 @@ def get_options_pdf(opt_ticker):
         exps = tk.options
         if len(exps) < 2: return None
         target_exp = exps[1] 
-        
         chain = tk.option_chain(target_exp)
         calls = chain.calls
-        
         calls = calls[(calls['volume'] > 10) & (calls['openInterest'] > 50)]
         if calls.empty: return None
-        
         calls['mid'] = (calls['bid'] + calls['ask']) / 2
         calls['price'] = np.where((calls['bid']==0), calls['lastPrice'], calls['mid'])
-        
         df = calls[['strike', 'price']].sort_values('strike')
-        
         spline = UnivariateSpline(df['strike'], df['price'], k=4, s=len(df)*2)
         strikes_smooth = np.linspace(df['strike'].min(), df['strike'].max(), 200)
-        
         pdf = spline.derivative(n=2)(strikes_smooth)
         pdf = np.maximum(pdf, 0)
-        
         peak_price = strikes_smooth[np.argmax(pdf)]
-        
         return {"strikes": strikes_smooth, "pdf": pdf, "peak": peak_price, "date": target_exp}
     except: return None
 
-# --- NEW: SEASONALITY FUNCTION ---
 @st.cache_data(ttl=3600)
 def get_day_of_week_stats(daily_data):
-    """Calculates frequency of Weekly Highs/Lows by Day of Week"""
     try:
         df = daily_data.copy()
-        
-        # Handle MultiIndex
-        if isinstance(df.columns, pd.MultiIndex):
-            df = df.droplevel(1, axis=1) # Flatten if needed for simple access
-            
-        # Add Week Identifier and Day Name
+        if isinstance(df.columns, pd.MultiIndex): df = df.droplevel(1, axis=1)
         df['Week_Num'] = df.index.to_period('W')
         df['Day_Name'] = df.index.day_name()
-        
-        # Filter incomplete weeks (counts must be > 1 to be a valid week)
         valid_weeks = df['Week_Num'].value_counts()
         valid_weeks = valid_weeks[valid_weeks >= 2].index
         df = df[df['Week_Num'].isin(valid_weeks)]
-        
-        # Find Day of Weekly High and Low
         weekly_groups = df.groupby('Week_Num')
-        
-        # Get the Day Name where the Max High occurred for each week
         high_days = df.loc[weekly_groups['High'].idxmax()]['Day_Name']
-        
-        # Get the Day Name where the Min Low occurred for each week
         low_days = df.loc[weekly_groups['Low'].idxmin()]['Day_Name']
-        
-        # Count frequencies
         days_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']
         high_counts = high_days.value_counts().reindex(days_order, fill_value=0)
         low_counts = low_days.value_counts().reindex(days_order, fill_value=0)
-        
-        # Normalize to Percentages
         total_weeks = len(high_days)
         high_pct = (high_counts / total_weeks) * 100
         low_pct = (low_counts / total_weeks) * 100
-        
         return high_pct, low_pct, total_weeks
-    except Exception as e:
-        return None, None, 0
+    except: return None, None, 0
 
 # --- TECHNICAL CALCULATIONS ---
 
@@ -245,7 +260,7 @@ def generate_monte_carlo(stock_data, days=126, simulations=1000):
 
 @st.cache_data(ttl=900)
 def get_ai_sentiment(api_key, asset_name, news_items):
-    if not api_key or not news_items or isinstance(news_items, str): return None
+    if not api_key or not news_items: return None
     try:
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel('gemini-pro')
@@ -264,7 +279,9 @@ with st.sidebar:
     news_key = get_api_key("news_api_key")
     fred_key = get_api_key("fred_api_key")
     google_key = get_api_key("google_api_key")
-    st.caption(f"Keys: News {'✅' if news_key else '❌'} | FRED {'✅' if fred_key else '❌'}")
+    rapid_key = get_api_key("rapidapi_key")
+    
+    st.caption(f"Keys: News {'✅' if news_key else '❌'} | FRED {'✅' if fred_key else '❌'} | Rapid {'✅' if rapid_key else '❌'}")
     if st.button("Refresh Data"): st.cache_data.clear()
 
 # --- MAIN DASHBOARD ---
@@ -276,6 +293,7 @@ intraday_data = get_intraday_data(asset_info['ticker'])
 macro_regime = get_macro_regime_data(fred_key)
 vol_forecast = calculate_volatility_permission(asset_info['ticker'])
 options_pdf = get_options_pdf(asset_info['opt_ticker'])
+eco_events = get_economic_calendar(rapid_key)
 
 # --- 1. OVERVIEW & MACRO REGIME ---
 if not daily_data.empty:
@@ -307,7 +325,46 @@ if not daily_data.empty:
     fig.update_layout(height=400, template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', xaxis_rangeslider_visible=False)
     st.plotly_chart(fig, use_container_width=True)
 
-# --- 2. VOLATILITY & INTRADAY ---
+# --- 2. ECONOMIC CALENDAR (NEW SECTION) ---
+if eco_events:
+    st.markdown("---")
+    st.subheader("📅 Today's Economic Events (USD)")
+    
+    # Create Dataframe
+    cal_data = []
+    for event in eco_events:
+        impact = event.get('impact', 'Low')
+        cal_data.append({
+            "Time": event.get('time', 'N/A'),
+            "Currency": event.get('currency', 'USD'),
+            "Event": event.get('event_name', 'Unknown'),
+            "Impact": impact,
+            "Forecast": event.get('forecast', '-'),
+            "Previous": event.get('previous', '-')
+        })
+    
+    df_cal = pd.DataFrame(cal_data)
+    
+    if not df_cal.empty:
+        # Style the dataframe for display
+        def highlight_impact(val):
+            color = ''
+            if val == 'High': color = 'color: #ff4b4b; font-weight: bold;'
+            elif val == 'Medium': color = 'color: #d4af37;'
+            return color
+
+        st.dataframe(
+            df_cal.style.map(highlight_impact, subset=['Impact']),
+            use_container_width=True,
+            hide_index=True
+        )
+    else:
+        st.info("No major USD events scheduled for today.")
+else:
+    if not rapid_key:
+        st.warning("Please add `rapidapi_key` to secrets.toml to see the Economic Calendar.")
+
+# --- 3. VOLATILITY & INTRADAY ---
 st.markdown("---")
 st.subheader("⚡ Intraday & Volatility Permissions")
 
@@ -325,87 +382,40 @@ if not intraday_data.empty and vol_forecast:
         fig_vol = go.Figure()
         fig_vol.add_trace(go.Bar(x=hist_tr.index, y=hist_tr.values, name="Realized TR%", marker_color='#333333'))
         fig_vol.add_trace(go.Scatter(x=hist_base.index, y=hist_base.values, name="Baseline", line=dict(color='gray', dash='dot')))
-        
         next_day = hist_tr.index[-1] + timedelta(days=1)
         f_color = '#00ff00' if vol_forecast['is_go'] else '#ff4b4b'
         fig_vol.add_trace(go.Bar(x=[next_day], y=[vol_forecast['forecast']], name="Forecast", marker_color=f_color))
-
         fig_vol.update_layout(title="Volatility Regime", yaxis_title="True Range %", template="plotly_dark", height=250, margin=dict(l=20, r=20, t=30, b=20), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
         st.plotly_chart(fig_vol, use_container_width=True)
-
-    # Intraday Metrics
+    
     if isinstance(intraday_data.columns, pd.MultiIndex): i_close = intraday_data['Close'].iloc[:, 0]; i_vol = intraday_data['Volume'].iloc[:, 0]
     else: i_close = intraday_data['Close']; i_vol = intraday_data['Volume']
-    
-    df_vwap = calculate_vwap(pd.DataFrame({'High': intraday_data['High'].iloc[:,0] if isinstance(intraday_data.columns, pd.MultiIndex) else intraday_data['High'], 
-                                         'Low': intraday_data['Low'].iloc[:,0] if isinstance(intraday_data.columns, pd.MultiIndex) else intraday_data['Low'], 
-                                         'Close': i_close, 'Volume': i_vol}))
+    df_vwap = calculate_vwap(pd.DataFrame({'High': intraday_data['High'].iloc[:,0] if isinstance(intraday_data.columns, pd.MultiIndex) else intraday_data['High'], 'Low': intraday_data['Low'].iloc[:,0] if isinstance(intraday_data.columns, pd.MultiIndex) else intraday_data['Low'], 'Close': i_close, 'Volume': i_vol}))
     current_vwap = df_vwap['VWAP'].iloc[-1]
-    
     col_dash1, col_dash2, col_dash3 = st.columns(3)
     with col_dash1: st.metric("VWAP Bias", "BULLISH" if i_close.iloc[-1] > current_vwap else "BEARISH")
     with col_dash2: st.metric("Volume Trend", "Rising" if i_vol.tail(3).mean() > i_vol.mean() else "Falling")
     with col_dash3: st.metric("Gap %", f"{((open_p.iloc[-1] - close.iloc[-2])/close.iloc[-2]*100):.2f}%")
 
-# --- 3. [NEW] SEASONALITY SECTION ---
+# --- 4. SEASONALITY ---
 st.markdown("---")
-st.subheader("📅 Day-of-Week Seasonality Stats")
-
+st.subheader("📅 Day-of-Week Seasonality")
 high_pct, low_pct, total_weeks = get_day_of_week_stats(daily_data)
-
 if high_pct is not None:
     s_col1, s_col2 = st.columns([3, 1])
-    
     with s_col1:
-        # Clustered Bar Chart
         fig_season = go.Figure()
-        
-        # Series 1: Highs (Green)
-        fig_season.add_trace(go.Bar(
-            x=high_pct.index, 
-            y=high_pct.values, 
-            name='Weekly High Occurs',
-            marker_color='#00ff00',
-            opacity=0.7
-        ))
-        
-        # Series 2: Lows (Red)
-        fig_season.add_trace(go.Bar(
-            x=low_pct.index, 
-            y=low_pct.values, 
-            name='Weekly Low Occurs',
-            marker_color='#ff4b4b',
-            opacity=0.7
-        ))
-
-        fig_season.update_layout(
-            title=f"Distribution of Weekly Extremes (Last {total_weeks} Weeks)",
-            yaxis_title="Frequency (%)",
-            barmode='group', # Cluster the bars
-            template="plotly_dark",
-            height=350,
-            paper_bgcolor='rgba(0,0,0,0)',
-            plot_bgcolor='rgba(0,0,0,0)'
-        )
+        fig_season.add_trace(go.Bar(x=high_pct.index, y=high_pct.values, name='Weekly High', marker_color='#00ff00', opacity=0.7))
+        fig_season.add_trace(go.Bar(x=low_pct.index, y=low_pct.values, name='Weekly Low', marker_color='#ff4b4b', opacity=0.7))
+        fig_season.update_layout(title=f"Weekly Extremes (Last {total_weeks} Weeks)", yaxis_title="Freq (%)", barmode='group', template="plotly_dark", height=350, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
         st.plotly_chart(fig_season, use_container_width=True)
-        
     with s_col2:
-        st.info("**What this shows:**\n\nThis analyzes on which Day of the Week the **High** or **Low** of the entire week typically lands.")
-        
-        # Identify Key patterns
-        most_common_high = high_pct.idxmax()
-        most_common_low = low_pct.idxmax()
-        
-        st.markdown(f"**Dominant High Day:**\n\n`{most_common_high}` ({high_pct.max():.1f}%)")
-        st.markdown(f"**Dominant Low Day:**\n\n`{most_common_low}` ({low_pct.max():.1f}%)")
-        
-        if most_common_low in ['Monday', 'Tuesday'] and most_common_high in ['Thursday', 'Friday']:
-            st.markdown("---")
-            st.success("Pattern: **Classic Trend Week** (Low early, High late)")
+        st.markdown(f"**High Day:** `{high_pct.idxmax()}`")
+        st.markdown(f"**Low Day:** `{low_pct.idxmax()}`")
 
-# --- 4. OPTIONS HEATMAP ---
+# --- 5. INSTITUTIONAL EXPECTATIONS & CONTEXT ---
 st.markdown("---")
-st.subheader("🏦 Institutional Expectations")
+st.subheader("🏦 Institutional Expectations & Context")
 if options_pdf:
     op_col1, op_col2 = st.columns([3, 1])
     with op_col1:
@@ -413,30 +423,24 @@ if options_pdf:
         fig_opt.add_trace(go.Scatter(x=options_pdf['strikes'], y=options_pdf['pdf'], fill='tozeroy', name='Implied Prob', line=dict(color='#00d4ff')))
         fig_opt.add_vline(x=curr, line_dash="dot", annotation_text="Spot")
         fig_opt.add_vline(x=options_pdf['peak'], line_dash="dash", line_color="#d4af37", annotation_text="Expected")
-        fig_opt.update_layout(template="plotly_dark", height=350, title=f"Probability Distribution (Exp: {options_pdf['date']})", paper_bgcolor='rgba(0,0,0,0)')
+        fig_opt.update_layout(template="plotly_dark", height=350, title=f"Options Distribution (Exp: {options_pdf['date']})", paper_bgcolor='rgba(0,0,0,0)')
         st.plotly_chart(fig_opt, use_container_width=True)
     with op_col2:
-        st.markdown(f"**Market Center:** `${options_pdf['peak']:.2f}`")
+        st.markdown(f"**Target:** `${options_pdf['peak']:.2f}`")
         st.markdown(f"**Skew:** `{'Bullish' if options_pdf['peak'] > curr else 'Bearish'}`")
 
-# --- 5. PREDICTION & CONTEXT ---
-st.markdown("---")
-st.subheader("🔮 6-Month Projection & Global Context")
-if not daily_data.empty:
-    pred_dates, pred_paths = generate_monte_carlo(daily_data)
-    
-    pc1, pc2 = st.columns(2)
-    with pc1:
-        fig_pred = go.Figure()
-        hist_slice = close.tail(90)
-        fig_pred.add_trace(go.Scatter(x=hist_slice.index, y=hist_slice.values, name='History', line=dict(color='white')))
-        fig_pred.add_trace(go.Scatter(x=pred_dates, y=np.mean(pred_paths, axis=1), name='Avg Path', line=dict(color='#00ff00', dash='dash')))
-        fig_pred.update_layout(height=350, template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', title="Monte Carlo Drift")
-        st.plotly_chart(fig_pred, use_container_width=True)
-    
-    with pc2:
-        corr_data = get_correlation_data()
-        if not corr_data.empty:
-            fig_heat = px.imshow(corr_data.corr(), text_auto=True, color_continuous_scale='RdBu_r', aspect="auto")
-            fig_heat.update_layout(template="plotly_dark", height=350, paper_bgcolor='rgba(0,0,0,0)', title="Asset Correlations")
-            st.plotly_chart(fig_heat, use_container_width=True)
+pred_dates, pred_paths = generate_monte_carlo(daily_data)
+pc1, pc2 = st.columns(2)
+with pc1:
+    fig_pred = go.Figure()
+    hist_slice = close.tail(90)
+    fig_pred.add_trace(go.Scatter(x=hist_slice.index, y=hist_slice.values, name='History', line=dict(color='white')))
+    fig_pred.add_trace(go.Scatter(x=pred_dates, y=np.mean(pred_paths, axis=1), name='Avg Path', line=dict(color='#00ff00', dash='dash')))
+    fig_pred.update_layout(height=350, template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', title="Monte Carlo Drift")
+    st.plotly_chart(fig_pred, use_container_width=True)
+with pc2:
+    corr_data = get_correlation_data()
+    if not corr_data.empty:
+        fig_heat = px.imshow(corr_data.corr(), text_auto=True, color_continuous_scale='RdBu_r', aspect="auto")
+        fig_heat.update_layout(template="plotly_dark", height=350, paper_bgcolor='rgba(0,0,0,0)', title="Asset Correlations")
+        st.plotly_chart(fig_heat, use_container_width=True)
