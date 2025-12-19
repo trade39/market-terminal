@@ -165,12 +165,9 @@ def get_ml_prediction(ticker):
         return model, prob_up
     except: return None, 0.5
 
-# --- 3. UPDATED GAMMA EXPOSURE ENGINE (FROM EXTRACTED CODE) ---
+# --- 3. UPDATED GAMMA EXPOSURE ENGINE ---
 
 def calculate_black_scholes_gamma(S, K, T, r, sigma):
-    """
-    Calculates the Gamma of an option using Black-Scholes.
-    """
     if T <= 0 or sigma <= 0: return 0
     d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
     gamma = norm.pdf(d1) / (S * sigma * np.sqrt(T))
@@ -178,77 +175,48 @@ def calculate_black_scholes_gamma(S, K, T, r, sigma):
 
 @st.cache_data(ttl=3600)
 def get_gex_profile(opt_ticker):
-    """
-    Fetches option chain, calculates Gamma per strike, and computes Net GEX.
-    Returns: DataFrame of strikes/GEX, Expiry Date, and Current Spot Price.
-    """
     if opt_ticker is None: return None, None, None
-
     try:
         tk = yf.Ticker(opt_ticker)
-        
-        # 1. Fetch Spot Price (Underlying)
         hist = tk.history(period="1d")
         if hist.empty: return None, None, None
         spot_price = hist['Close'].iloc[-1]
-
-        # 2. Get Expiration Dates
         exps = tk.options
         if not exps or len(exps) < 2: return None, None, None
-        
-        # Select the next expiration (usually index 1 to avoid 0DTE noise)
         target_exp = exps[1]
-        
-        # 3. Fetch Option Chain
         chain = tk.option_chain(target_exp)
         calls, puts = chain.calls, chain.puts
-        
         if calls.empty or puts.empty: return None, None, None
 
-        # 4. Setup Calculation Variables
-        r = 0.045  # Risk-free rate assumption (4.5%)
+        r = 0.045
         exp_date = datetime.strptime(target_exp, "%Y-%m-%d")
         days_to_exp = (exp_date - datetime.now()).days
-        
-        # Avoid division by zero for expiring options
-        if days_to_exp <= 0: T = 0.001 
-        else: T = days_to_exp / 365.0
+        T = 0.001 if days_to_exp <= 0 else days_to_exp / 365.0
         
         gex_data = []
-        # Get unique strikes from both calls and puts
         strikes = sorted(list(set(calls['strike'].tolist() + puts['strike'].tolist())))
         
-        # 5. Iterate Strikes and Calculate Net Gamma
         for K in strikes:
-            # Filter: Only calculate for strikes within 30% of spot price (Optimization)
-            if K < spot_price * 0.7 or K > spot_price * 1.3: continue 
+            if K < spot_price * 0.7 or K > spot_price * 1.3: continue
             
-            # Get Call Data
             c_row = calls[calls['strike'] == K]
             c_oi = c_row['openInterest'].iloc[0] if not c_row.empty else 0
             c_iv = c_row['impliedVolatility'].iloc[0] if not c_row.empty and 'impliedVolatility' in c_row.columns else 0.2
             
-            # Get Put Data
             p_row = puts[puts['strike'] == K]
             p_oi = p_row['openInterest'].iloc[0] if not p_row.empty else 0
             p_iv = p_row['impliedVolatility'].iloc[0] if not p_row.empty and 'impliedVolatility' in p_row.columns else 0.2
             
-            # Calculate Gamma
             c_gamma = calculate_black_scholes_gamma(spot_price, K, T, r, c_iv)
             p_gamma = calculate_black_scholes_gamma(spot_price, K, T, r, p_iv)
             
-            # Calculate Net GEX: (Call Gamma * OI - Put Gamma * OI) * Spot * 100 (contract size)
             net_gex = (c_gamma * c_oi - p_gamma * p_oi) * spot_price * 100
             gex_data.append({"strike": K, "gex": net_gex})
             
         df = pd.DataFrame(gex_data, columns=['strike', 'gex'])
-        
         if df.empty: return None, None, None
-            
         return df, target_exp, spot_price
-
-    except Exception as e:
-        return None, None, None
+    except: return None, None, None
 
 # --- 4. VOLUME PROFILE ENGINE ---
 def calculate_volume_profile(df, bins=50):
@@ -288,7 +256,6 @@ def generate_monte_carlo(stock_data, days=126, simulations=1000):
     return pd.date_range(start=close.index[-1], periods=days + 1, freq='B'), price_paths
 
 # --- 6. NEWS & ECONOMICS ---
-
 def parse_eco_value(val_str):
     if not isinstance(val_str, str) or val_str == '': return None
     clean = val_str.replace('%', '').replace(',', '')
@@ -361,13 +328,107 @@ def get_economic_calendar(api_key):
         
         filtered_events = []
         for e in raw_events:
-            # Filter: USD ONLY & HIGH IMPACT ONLY
             if e.get('currency') == 'USD' and e.get('impact') == 'High':
                 filtered_events.append(e)
         return filtered_events
     except: return []
 
-# --- 7. DATA FETCHERS ---
+# --- 7. NEW INSTITUTIONAL FEATURES ---
+
+# A. BACKTEST ENGINE (Replaces Vol Permission)
+@st.cache_data(ttl=300)
+def run_strategy_backtest(ticker):
+    try:
+        df = yf.download(ticker, period="2y", interval="1d", progress=False)
+        df = flatten_dataframe(df)
+        if df.empty: return None
+
+        # 1. Calculate Indicators
+        df['Returns'] = df['Close'].pct_change()
+        df['Range'] = df['High'] - df['Low']
+        df['TR'] = pd.concat([df['Range'], (df['High'] - df['Close'].shift(1)).abs(), (df['Low'] - df['Close'].shift(1)).abs()], axis=1).max(axis=1)
+        
+        # Volatility Filter Logic
+        df['Log_TR'] = np.log(df['TR'] / df['Close'])
+        df['Vol_Forecast'] = df['Log_TR'].ewm(span=10).mean()
+        df['Vol_Baseline'] = df['Log_TR'].rolling(20).mean()
+        
+        # 2. Vectorized Backtest
+        # Signal: Long only if Vol Forecast > Baseline (expansion) AND Trend is up (SMA 50)
+        df['SMA_50'] = df['Close'].rolling(50).mean()
+        df['Signal'] = np.where((df['Vol_Forecast'] > df['Vol_Baseline']) & (df['Close'] > df['SMA_50']), 1, 0)
+        
+        # Shift signal to prevent lookahead bias
+        df['Strategy_Returns'] = df['Signal'].shift(1) * df['Returns']
+        
+        # 3. Performance Metrics
+        df['Cum_BnH'] = (1 + df['Returns']).cumprod()
+        df['Cum_Strat'] = (1 + df['Strategy_Returns']).cumprod()
+        
+        total_return = df['Cum_Strat'].iloc[-1] - 1
+        sharpe = (df['Strategy_Returns'].mean() / df['Strategy_Returns'].std()) * np.sqrt(252) if df['Strategy_Returns'].std() != 0 else 0
+        
+        current_signal = "LONG" if df['Signal'].iloc[-1] == 1 else "CASH/NEUTRAL"
+        
+        return {
+            "df": df, 
+            "signal": current_signal, 
+            "return": total_return, 
+            "sharpe": sharpe, 
+            "equity_curve": df['Cum_Strat']
+        }
+    except Exception as e:
+        return None
+
+# B. ANCHORED VWAP
+def calculate_vwap_bands(df):
+    if df.empty: return df
+    df = df.copy()
+    
+    # Calculate typical price
+    df['TP'] = (df['High'] + df['Low'] + df['Close']) / 3
+    df['VP'] = df['TP'] * df['Volume']
+    
+    # Anchor VWAP to the start of the data loaded
+    df['Cum_VP'] = df['VP'].cumsum()
+    df['Cum_Vol'] = df['Volume'].cumsum()
+    df['VWAP'] = df['Cum_VP'] / df['Cum_Vol']
+    
+    # Calculate Variance for Bands
+    df['Sq_Dist'] = df['Volume'] * (df['TP'] - df['VWAP'])**2
+    df['Cum_Sq_Dist'] = df['Sq_Dist'].cumsum()
+    df['Std_Dev'] = np.sqrt(df['Cum_Sq_Dist'] / df['Cum_Vol'])
+    
+    df['Upper_Band_1'] = df['VWAP'] + df['Std_Dev']
+    df['Lower_Band_1'] = df['VWAP'] - df['Std_Dev']
+    df['Upper_Band_2'] = df['VWAP'] + (df['Std_Dev'] * 2)
+    df['Lower_Band_2'] = df['VWAP'] - (df['Std_Dev'] * 2)
+    
+    return df
+
+# C. MACRO CORRELATIONS
+@st.cache_data(ttl=3600)
+def get_correlations(base_ticker):
+    try:
+        tickers = {
+            "Base": base_ticker,
+            "VIX": "^VIX",
+            "10Y Yield": "^TNX",
+            "Dollar": "DX-Y.NYB",
+            "Gold": "GC=F"
+        }
+        
+        data = yf.download(list(tickers.values()), period="6mo", progress=False)['Close']
+        data = flatten_dataframe(data)
+        
+        rev_tickers = {v: k for k, v in tickers.items()}
+        data.rename(columns=rev_tickers, inplace=True)
+        
+        corrs = data.pct_change().rolling(20).corr(data[base_ticker].pct_change()).iloc[-1]
+        return corrs.drop(base_ticker) 
+    except: return pd.Series()
+
+# --- 8. DATA FETCHERS ---
 @st.cache_data(ttl=60)
 def get_daily_data(ticker):
     try:
@@ -381,24 +442,6 @@ def get_intraday_data(ticker):
         data = yf.download(ticker, period="5d", interval="15m", progress=False)
         return flatten_dataframe(data)
     except: return pd.DataFrame()
-
-@st.cache_data(ttl=300)
-def calculate_volatility_permission(ticker):
-    try:
-        df = yf.download(ticker, period="1y", interval="1d", progress=False)
-        df = flatten_dataframe(df)
-        if df.empty: return None
-        close = df['Close']
-        high, low = df['High'], df['Low']
-        prev_close = close.shift(1)
-        tr = pd.concat([high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
-        tr_pct = (tr / close) * 100
-        tr_pct = tr_pct.dropna()
-        log_tr = np.log(tr_pct)
-        forecast_tr = np.exp(log_tr.ewm(alpha=0.94).mean().iloc[-1])
-        baseline = tr_pct.rolling(20).mean().iloc[-1]
-        return {"forecast": forecast_tr, "baseline": baseline, "is_go": forecast_tr > baseline, "signal": "TRADE PERMITTED" if forecast_tr > baseline else "NO TRADE / CAUTION", "history": tr_pct}
-    except: return None
 
 def terminal_chart_layout(fig, title="", height=350):
     fig.update_layout(
@@ -419,8 +462,16 @@ with st.sidebar:
     st.markdown("<h3 style='color: #ff9900;'>COMMAND LINE</h3>", unsafe_allow_html=True)
     selected_asset = st.selectbox("SEC / Ticker", list(ASSETS.keys()))
     asset_info = ASSETS[selected_asset]
-    st.markdown("---")
     
+    st.markdown("---")
+    st.markdown("**MACRO CORRELATIONS (20D)**")
+    corrs = get_correlations(asset_info['ticker'])
+    if not corrs.empty:
+        for idx, val in corrs.items():
+            c_color = "#ff3333" if val > 0.5 else "#00ff00" if val < -0.5 else "gray" 
+            st.markdown(f"{idx}: <span style='color:{c_color}'>{val:.2f}</span>", unsafe_allow_html=True)
+    
+    st.markdown("---")
     fred_key = get_api_key("fred_api_key")
     rapid_key = get_api_key("rapidapi_key")
     news_key = get_api_key("news_api_key")
@@ -442,16 +493,12 @@ st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <sp
 # Fetch Data
 daily_data = get_daily_data(asset_info['ticker'])
 intraday_data = get_intraday_data(asset_info['ticker'])
-vol_forecast = calculate_volatility_permission(asset_info['ticker'])
 eco_events = get_economic_calendar(rapid_key)
 news_items = get_financial_news(news_key, query="Finance")
 
 # Engines
 _, ml_prob = get_ml_prediction(asset_info['ticker'])
-
-# UPDATED: GEX now returns spot_price as well
 gex_df, gex_date, gex_spot = get_gex_profile(asset_info['opt_ticker'])
-
 vol_profile, poc_price = calculate_volume_profile(intraday_data)
 hurst = calculate_hurst(daily_data['Close'].values) if not daily_data.empty else 0.5
 regime_data = get_market_regime(asset_info['ticker'])
@@ -549,40 +596,38 @@ with col_news:
     else:
         st.markdown("<div style='color:gray;'>NO NEWS FEED AVAILABLE</div>", unsafe_allow_html=True)
 
-# --- 3. RISK ANALYSIS ---
+# --- 3. RISK ANALYSIS & BACKTEST ---
 st.markdown("---")
-st.markdown("### ⚡ QUANTITATIVE RISK ANALYSIS")
+st.markdown("### ⚡ QUANTITATIVE RISK & EXECUTION")
 
-if not intraday_data.empty and vol_forecast:
+# Run the Backtest
+strat_perf = run_strategy_backtest(asset_info['ticker'])
+
+if not intraday_data.empty and strat_perf:
     q1, q2, q3 = st.columns([1, 2, 2])
+    
     with q1:
-        st.markdown("**VOL FILTER**")
-        badge_class = "vol-go" if vol_forecast['is_go'] else "vol-stop"
-        st.markdown(f"<div style='margin:10px 0;'><span class='{badge_class}'>{vol_forecast['signal']}</span></div>", unsafe_allow_html=True)
+        st.markdown("**STRATEGY SIGNAL**")
+        sig_color = "#00ff00" if "LONG" in strat_perf['signal'] else "#ffff00"
+        st.markdown(f"<span style='color:{sig_color}; font-size:1.8em; font-weight:bold;'>{strat_perf['signal']}</span>", unsafe_allow_html=True)
         
-        rr_ratio = 1.5 if vol_forecast['is_go'] else 1.0
-        kelly_pct = 0
-        if ml_prob > 0.5:
-            p = ml_prob
-            q = 1 - p
-            b = rr_ratio
-            kelly_pct = (p - (q / b)) * 100
-        safe_kelly = max(0, kelly_pct * 0.5)
-        
-        st.markdown("**KELLY SIZING**")
-        k_color = "#00ff00" if safe_kelly > 0 else "#ff3333"
-        st.markdown(f"<span style='color:{k_color}; font-size:1.5em; font-weight:bold;'>{safe_kelly:.1f}%</span>", unsafe_allow_html=True)
-        st.caption(f"Based on AI Prob: {ml_prob:.0%}")
+        st.markdown("---")
+        st.markdown("**BACKTEST (2Y)**")
+        ret_color = "#00ff00" if strat_perf['return'] > 0 else "#ff3333"
+        st.metric("Total Return", f"{strat_perf['return']*100:.1f}%")
+        st.metric("Sharpe Ratio", f"{strat_perf['sharpe']:.2f}")
 
     with q2:
-        hist_tr = vol_forecast['history'].tail(40)
-        fig_vol = go.Figure()
-        fig_vol.add_trace(go.Bar(x=hist_tr.index, y=hist_tr.values, name="Realized", marker_color='#333333'))
-        next_day = hist_tr.index[-1] + timedelta(days=1)
-        f_color = '#00ff00' if vol_forecast['is_go'] else '#ff3333'
-        fig_vol.add_trace(go.Bar(x=[next_day], y=[vol_forecast['forecast']], name="Forecast", marker_color=f_color))
-        terminal_chart_layout(fig_vol, title="VOLATILITY REGIME", height=250)
-        st.plotly_chart(fig_vol, use_container_width=True)
+        # Plot Equity Curve vs Buy & Hold
+        ec_df = pd.DataFrame({
+            "Strategy": strat_perf['equity_curve'],
+            "Buy & Hold": strat_perf['df']['Cum_BnH']
+        })
+        fig_perf = go.Figure()
+        fig_perf.add_trace(go.Scatter(x=ec_df.index, y=ec_df['Buy & Hold'], name="Buy & Hold", line=dict(color='gray', dash='dot')))
+        fig_perf.add_trace(go.Scatter(x=ec_df.index, y=ec_df['Strategy'], name="Active Strat", line=dict(color='#00e6ff', width=2)))
+        terminal_chart_layout(fig_perf, title="STRATEGY EDGE VALIDATION", height=300)
+        st.plotly_chart(fig_perf, use_container_width=True)
 
     with q3:
         if vol_profile is not None:
@@ -590,10 +635,27 @@ if not intraday_data.empty and vol_forecast:
             colors = ['#00e6ff' if x == poc_price else '#333' for x in vol_profile['PriceLevel']]
             fig_vp.add_trace(go.Bar(y=vol_profile['PriceLevel'], x=vol_profile['Volume'], orientation='h', marker_color='#ff9900', opacity=0.4))
             fig_vp.add_hline(y=poc_price, line_dash="dash", line_color="yellow", annotation_text="POC")
-            terminal_chart_layout(fig_vp, title="INTRADAY VOLUME PROFILE", height=250)
+            terminal_chart_layout(fig_vp, title="INTRADAY VOLUME PROFILE", height=300)
             st.plotly_chart(fig_vp, use_container_width=True)
 
-# --- 4. GEX ---
+# --- 4. VWAP EXECUTION ---
+st.markdown("#### 🎯 VWAP LIQUIDITY BANDS")
+vwap_df = calculate_vwap_bands(intraday_data)
+
+if not vwap_df.empty:
+    fig_vwap = go.Figure()
+    # Candlestick
+    fig_vwap.add_trace(go.Candlestick(x=vwap_df.index, open=vwap_df['Open'], high=vwap_df['High'], low=vwap_df['Low'], close=vwap_df['Close'], name="Price"))
+    # VWAP & Bands
+    fig_vwap.add_trace(go.Scatter(x=vwap_df.index, y=vwap_df['VWAP'], name="VWAP", line=dict(color='#ff9900', width=2)))
+    fig_vwap.add_trace(go.Scatter(x=vwap_df.index, y=vwap_df['Upper_Band_1'], name="+1 STD", line=dict(color='gray', width=1), opacity=0.5))
+    fig_vwap.add_trace(go.Scatter(x=vwap_df.index, y=vwap_df['Lower_Band_1'], name="-1 STD", line=dict(color='gray', width=1), opacity=0.5))
+    
+    terminal_chart_layout(fig_vwap, height=400)
+    st.plotly_chart(fig_vwap, use_container_width=True)
+
+
+# --- 5. GEX ---
 st.markdown("---")
 st.markdown("### 🏦 INSTITUTIONAL GAMMA EXPOSURE (GEX)")
 
@@ -632,7 +694,7 @@ else:
     else:
         st.warning("GEX CALCULATION SKIPPED: NO OPTIONS CHAIN FOUND OR LIQUIDITY TOO LOW.")
 
-# --- 5. MONTE CARLO & SEASONALITY ---
+# --- 6. MONTE CARLO & SEASONALITY ---
 st.markdown("---")
 st.markdown("### 🎲 SIMULATION & SEASONALITY")
 s1, s2 = st.columns(2)
@@ -654,7 +716,7 @@ with s2:
         terminal_chart_layout(fig_d, title="PROBABILITY OF WEEKLY HIGH")
         st.plotly_chart(fig_d, use_container_width=True)
 
-# --- 6. CONCLUSION ---
+# --- 7. CONCLUSION ---
 st.markdown("---")
 st.markdown("### 🏁 EXECUTIVE SUMMARY")
 
