@@ -40,7 +40,8 @@ ASSETS = {
     "NASDAQ": {"ticker": "^IXIC", "opt_ticker": "QQQ", "news_query": "Nasdaq"},
     "Gold (Comex)": {"ticker": "GC=F", "opt_ticker": "GLD", "news_query": "Gold Price"},
     "EUR/USD": {"ticker": "EURUSD=X", "opt_ticker": "FXE", "news_query": "EURUSD"},
-    "NVIDIA": {"ticker": "NVDA", "opt_ticker": "NVDA", "news_query": "Nvidia Stock"}
+    "NVIDIA": {"ticker": "NVDA", "opt_ticker": "NVDA", "news_query": "Nvidia Stock"},
+    "Bitcoin": {"ticker": "BTC-USD", "opt_ticker": "BITO", "news_query": "Bitcoin Crypto"}
 }
 
 DXY_TICKER = "DX-Y.NYB"
@@ -104,8 +105,7 @@ def analyze_event_impact(event_name, val_main, val_compare, is_actual):
 @st.cache_data(ttl=60)
 def get_daily_data(ticker):
     try:
-        # UPDATED to 10y for better Seasonality Stats
-        data = yf.download(ticker, period="10y", interval="1d", progress=False)
+        data = yf.download(ticker, period="5y", interval="1d", progress=False)
         return data
     except Exception:
         return pd.DataFrame()
@@ -123,11 +123,11 @@ def get_news(api_key, query):
     if not api_key: return None
     try:
         newsapi = NewsApiClient(api_key=api_key)
-        start_date = (datetime.now() - timedelta(days=28)).strftime('%Y-%m-%d')
+        start_date = (datetime.now() - timedelta(days=5)).strftime('%Y-%m-%d')
         articles = newsapi.get_everything(q=query, from_param=start_date, language='en', sort_by='relevancy', page_size=10)
         return articles['articles']
     except Exception as e:
-        return f"Error: {str(e)}"
+        return None
 
 @st.cache_data(ttl=3600)
 def get_economic_calendar(api_key):
@@ -287,12 +287,27 @@ def calculate_vwap(df):
     df['VWAP'] = df['TPV'].cumsum() / df['Volume'].cumsum()
     return df
 
-def calculate_rsi(series, period=14):
-    delta = series.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-    rs = gain / loss
-    return 100 - (100 / (1 + rs))
+@st.cache_data(ttl=3600)
+def get_liquidity_levels(df, window=5):
+    """Identifies Swing Highs and Lows (Liquidity Zones)"""
+    df_c = df.copy()
+    if isinstance(df_c.columns, pd.MultiIndex):
+        df_c = df_c.droplevel(1, axis=1)
+        
+    df_c['High_Max'] = df_c['High'].rolling(window=window*2+1, center=True).max()
+    df_c['Low_Min'] = df_c['Low'].rolling(window=window*2+1, center=True).min()
+    
+    swing_highs = df_c[df_c['High'] == df_c['High_Max']]
+    swing_lows = df_c[df_c['Low'] == df_c['Low_Min']]
+    
+    # Get last 3 valid swings
+    levels = []
+    for date, row in swing_highs.tail(3).iterrows():
+        levels.append({'price': row['High'], 'type': 'Resistance', 'date': date})
+    for date, row in swing_lows.tail(3).iterrows():
+        levels.append({'price': row['Low'], 'type': 'Support', 'date': date})
+        
+    return levels
 
 @st.cache_data(ttl=3600)
 def get_correlation_data():
@@ -336,6 +351,14 @@ with st.sidebar:
     selected_asset = st.selectbox("Select Asset", list(ASSETS.keys()))
     asset_info = ASSETS[selected_asset]
     st.markdown("---")
+    
+    # Chart Overlays
+    st.subheader("Chart Overlays")
+    show_vwap = st.checkbox("Show VWAP", value=True)
+    show_liquidity = st.checkbox("Show Liquidity Zones", value=True)
+    show_ema = st.checkbox("Show EMA 50/200", value=False)
+    
+    st.markdown("---")
     news_key = get_api_key("news_api_key")
     fred_key = get_api_key("fred_api_key")
     google_key = get_api_key("google_api_key")
@@ -353,11 +376,14 @@ macro_regime = get_macro_regime_data(fred_key)
 vol_forecast = calculate_volatility_permission(asset_info['ticker'])
 options_pdf = get_options_pdf(asset_info['opt_ticker'])
 eco_events = get_economic_calendar(rapid_key)
+news_items = get_news(news_key, asset_info['news_query'])
 
-# --- 1. OVERVIEW & MACRO REGIME ---
+# --- 1. OVERVIEW & CHARTING (UPDATED) ---
 if not daily_data.empty:
-    if isinstance(daily_data.columns, pd.MultiIndex): close, high, low, open_p = daily_data['Close'].iloc[:, 0], daily_data['High'].iloc[:, 0], daily_data['Low'].iloc[:, 0], daily_data['Open'].iloc[:, 0]
-    else: close, high, low, open_p = daily_data['Close'], daily_data['High'], daily_data['Low'], daily_data['Open']
+    if isinstance(daily_data.columns, pd.MultiIndex): 
+        close, high, low, open_p = daily_data['Close'].iloc[:, 0], daily_data['High'].iloc[:, 0], daily_data['Low'].iloc[:, 0], daily_data['Open'].iloc[:, 0]
+    else: 
+        close, high, low, open_p = daily_data['Close'], daily_data['High'], daily_data['Low'], daily_data['Open']
 
     curr = close.iloc[-1]
     pct = ((curr - close.iloc[-2]) / close.iloc[-2]) * 100
@@ -379,12 +405,67 @@ if not daily_data.empty:
     else:
         c4.metric("Vol", f"{(close.pct_change().std()* (252**0.5)*100):.2f}%")
 
+    # --- ADVANCED CHART ---
     fig = go.Figure()
+    
+    # Candlestick
     fig.add_trace(go.Candlestick(x=daily_data.index, open=open_p, high=high, low=low, close=close, name="Price"))
-    fig.update_layout(height=400, template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', xaxis_rangeslider_visible=False)
+    
+    # EMA Overlay
+    if show_ema:
+        ema50 = close.ewm(span=50).mean()
+        ema200 = close.ewm(span=200).mean()
+        fig.add_trace(go.Scatter(x=daily_data.index, y=ema50, name="EMA 50", line=dict(color='cyan', width=1)))
+        fig.add_trace(go.Scatter(x=daily_data.index, y=ema200, name="EMA 200", line=dict(color='orange', width=1)))
+
+    # Liquidity Zones (Swing Highs/Lows)
+    if show_liquidity:
+        liq_levels = get_liquidity_levels(daily_data)
+        for lvl in liq_levels:
+            color = 'rgba(255, 0, 0, 0.5)' if lvl['type'] == 'Resistance' else 'rgba(0, 255, 0, 0.5)'
+            fig.add_hline(y=lvl['price'], line_dash="dash", line_color=color, annotation_text=f"{lvl['type']} {lvl['price']:.2f}", annotation_position="top right")
+
+    # VWAP (Intraday or Daily approximation)
+    if show_vwap:
+        # Use daily typical price cumsum for a rudimentary longer term VWAP or intraday if available
+        # Here using the helper function on Daily data for "Yearly/Period VWAP" approximation
+        df_v = calculate_vwap(daily_data.copy() if isinstance(daily_data.columns, pd.MultiIndex) else daily_data)
+        if 'VWAP' in df_v.columns:
+            # MultiIndex handling for VWAP
+            vwap_vals = df_v['VWAP'].iloc[:,0] if isinstance(df_v['VWAP'], pd.DataFrame) else df_v['VWAP']
+            fig.add_trace(go.Scatter(x=daily_data.index, y=vwap_vals, name="Anchor VWAP", line=dict(color='#d4af37', width=2)))
+
+    fig.update_layout(height=500, template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', xaxis_rangeslider_visible=False, title="Price Action & Market Structure")
     st.plotly_chart(fig, use_container_width=True)
 
-# --- 2. ECONOMIC CALENDAR ---
+# --- 2. SENTIMENT & AI ANALYSIS (NEW VISUALIZATION) ---
+st.markdown("---")
+st.subheader("🤖 AI Sentiment & News")
+ai_col, news_col = st.columns([1, 2])
+
+with ai_col:
+    if news_items and google_key:
+        sentiment_summary = get_ai_sentiment(google_key, selected_asset, news_items)
+        if sentiment_summary:
+            st.markdown(f"""
+            <div class="sentiment-box">
+                <h4>AI Summary</h4>
+                <p>{sentiment_summary}</p>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.info("Generating AI Analysis...")
+    else:
+        st.warning("Add Google API Key for AI Analysis")
+
+with news_col:
+    if news_items:
+        with st.expander("📰 Latest Headlines (Click to Expand)", expanded=False):
+            for article in news_items[:5]:
+                st.markdown(f"**[{article['title']}]({article['url']})**")
+                st.caption(f"{article['source']['name']} - {article['publishedAt'][:10]}")
+
+# --- 3. ECONOMIC CALENDAR ---
 st.markdown("---")
 st.subheader("📅 Today's Economic Events (USD)")
 
@@ -424,7 +505,7 @@ else:
     if not rapid_key: st.warning("⚠️ **Missing API Key:** Please add `rapidapi_key` to your `secrets.toml` file.")
     else: st.info("ℹ️ No Data Found Today.")
 
-# --- 3. VOLATILITY & INTRADAY ---
+# --- 4. VOLATILITY & INTRADAY ---
 st.markdown("---")
 st.subheader("⚡ Intraday & Volatility Permissions")
 
@@ -456,7 +537,7 @@ if not intraday_data.empty and vol_forecast:
     with col_dash2: st.metric("Volume Trend", "Rising" if i_vol.tail(3).mean() > i_vol.mean() else "Falling")
     with col_dash3: st.metric("Gap %", f"{((open_p.iloc[-1] - close.iloc[-2])/close.iloc[-2]*100):.2f}%")
 
-# --- 4. TIME-BASED SEASONALITY (UPDATED) ---
+# --- 5. TIME-BASED SEASONALITY (UPDATED) ---
 st.markdown("---")
 st.subheader("📅 Time-Based Seasonality")
 season_stats = get_seasonality_stats(daily_data)
@@ -492,7 +573,7 @@ if season_stats:
         st.plotly_chart(fig_m, use_container_width=True)
         st.caption("Shows which Month typically prints the High/Low of the entire Year.")
 
-# --- 5. INSTITUTIONAL EXPECTATIONS & CONTEXT ---
+# --- 6. INSTITUTIONAL EXPECTATIONS & CONTEXT ---
 st.markdown("---")
 st.subheader("🏦 Institutional Expectations & Context")
 if options_pdf:
@@ -525,7 +606,7 @@ with pc2:
         fig_heat.update_layout(template="plotly_dark", height=350, paper_bgcolor='rgba(0,0,0,0)', title="Asset Correlations")
         st.plotly_chart(fig_heat, use_container_width=True)
 
-# --- 6. CONCLUSION (NEW SECTION) ---
+# --- 7. CONCLUSION (NEW SECTION) ---
 st.markdown("---")
 st.subheader("🏁 Executive Summary")
 
