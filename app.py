@@ -67,9 +67,9 @@ st.markdown("""
 
 # --- CONSTANTS & MAPPINGS ---
 ASSETS = {
+    "Gold (Comex)": {"ticker": "GC=F", "opt_ticker": "GLD"},  # <--- Moved to top (Default)
     "S&P 500": {"ticker": "^GSPC", "opt_ticker": "SPY"},
     "NASDAQ": {"ticker": "^IXIC", "opt_ticker": "QQQ"},
-    "Gold (Comex)": {"ticker": "GC=F", "opt_ticker": "GLD"},
     "EUR/USD": {"ticker": "EURUSD=X", "opt_ticker": "FXE"},
     "NVIDIA": {"ticker": "NVDA", "opt_ticker": "NVDA"},
     "Bitcoin": {"ticker": "BTC-USD", "opt_ticker": "BITO"}
