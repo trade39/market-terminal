@@ -11,9 +11,10 @@ from datetime import datetime, timedelta
 from scipy.interpolate import UnivariateSpline
 from scipy.stats import norm
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.mixture import GaussianMixture # New Import for GMM
 
 # --- APP CONFIGURATION ---
-st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V2", page_icon="💹")
+st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V3", page_icon="💹")
 
 # --- BLOOMBERG TERMINAL STYLING (CSS) ---
 st.markdown("""
@@ -67,7 +68,7 @@ st.markdown("""
 
 # --- CONSTANTS & MAPPINGS ---
 ASSETS = {
-    "Gold (Comex)": {"ticker": "GC=F", "opt_ticker": "GLD"},  # <--- Moved to top (Default)
+    "Gold (Comex)": {"ticker": "GC=F", "opt_ticker": "GLD"},
     "S&P 500": {"ticker": "^GSPC", "opt_ticker": "SPY"},
     "NASDAQ": {"ticker": "^IXIC", "opt_ticker": "QQQ"},
     "EUR/USD": {"ticker": "EURUSD=X", "opt_ticker": "FXE"},
@@ -95,7 +96,68 @@ def flatten_dataframe(df):
     df = df.loc[:, ~df.columns.duplicated()]
     return df
 
-# --- 1. NEW: MACHINE LEARNING ENGINE ---
+# --- 1. NEW: INSTITUTIONAL QUANT ENGINE (GMM + HURST) ---
+
+def calculate_hurst(series, lags=range(2, 20)):
+    """Calculates the Hurst Exponent to determine fractal dimension."""
+    try:
+        # Standard deviation of difference between series and lagged series
+        tau = [np.sqrt(np.std(np.subtract(series[lag:], series[:-lag]))) for lag in lags]
+        # Slope of log-log plot
+        poly = np.polyfit(np.log(lags), np.log(tau), 1)
+        return poly[0] * 2.0
+    except: return 0.5
+
+@st.cache_data(ttl=3600)
+def get_market_regime(ticker):
+    """
+    Uses Gaussian Mixture Models (Unsupervised Learning) to classify 
+    market states into: Low Vol Bull, High Vol Bear, or Neutral.
+    """
+    try:
+        df = yf.download(ticker, period="5y", interval="1d", progress=False)
+        df = flatten_dataframe(df)
+        if df.empty: return None
+        
+        data = df.copy()
+        data['Returns'] = data['Close'].pct_change()
+        data['Volatility'] = data['Returns'].rolling(20).std()
+        data = data.dropna()
+        
+        # Prepare features for Clustering
+        X = data[['Returns', 'Volatility']].values
+        
+        # Fit GMM with 3 components (Bull, Bear, Neutral/Chop)
+        gmm = GaussianMixture(n_components=3, covariance_type="full", random_state=42)
+        gmm.fit(X)
+        
+        # Predict current state
+        current_state = gmm.predict(X[[-1]])[0]
+        probs = gmm.predict_proba(X[[-1]])[0]
+        
+        # Interpret States (Heuristic: Highest Return mean = Bull, Highest Vol mean = Bear)
+        means = gmm.means_
+        # Sort states by volatility: 0=Low Vol, 2=High Vol
+        state_order = np.argsort(means[:, 1]) 
+        
+        # Create map based on volatility sorting
+        regime_map = {
+            state_order[0]: "LOW VOL (Trend)", 
+            state_order[1]: "NEUTRAL (Chop)", 
+            state_order[2]: "HIGH VOL (Crisis)"
+        }
+        regime_desc = regime_map.get(current_state, "Unknown")
+        
+        # Color Logic
+        if "LOW VOL" in regime_desc: color = "bullish"
+        elif "HIGH VOL" in regime_desc: color = "bearish"
+        else: color = "neutral"
+        
+        return {"regime": regime_desc, "color": color, "confidence": max(probs)}
+    except: return None
+
+
+# --- 2. MACHINE LEARNING ENGINE ---
 def calculate_rsi(series, period=14):
     delta = series.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
@@ -134,7 +196,7 @@ def get_ml_prediction(ticker):
         return model, prob_up
     except: return None, 0.5
 
-# --- 2. NEW: GAMMA EXPOSURE ENGINE (FIXED) ---
+# --- 3. GAMMA EXPOSURE ENGINE (FIXED) ---
 def calculate_black_scholes_gamma(S, K, T, r, sigma):
     if T <= 0 or sigma <= 0: return 0
     d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
@@ -188,7 +250,7 @@ def get_gex_profile(opt_ticker, spot_price):
     except Exception as e:
         return None, None
 
-# --- 3. NEW: VOLUME PROFILE ENGINE ---
+# --- 4. VOLUME PROFILE ENGINE ---
 def calculate_volume_profile(df, bins=50):
     if df.empty: return None, None
     
@@ -206,7 +268,7 @@ def calculate_volume_profile(df, bins=50):
     
     return vol_profile, poc_price
 
-# --- 4. NEW: KELLY CRITERION ---
+# --- 5. KELLY CRITERION ---
 def calculate_kelly(prob_win, risk_reward_ratio):
     p = prob_win
     q = 1 - p
@@ -215,7 +277,7 @@ def calculate_kelly(prob_win, risk_reward_ratio):
     f = p - (q / b)
     return max(0, f)
 
-# --- ORIGINAL CODE #1 FUNCTIONS ---
+# --- ORIGINAL HELPER FUNCTIONS ---
 
 def parse_eco_value(val_str):
     if not isinstance(val_str, str) or val_str == '': return None
@@ -354,7 +416,7 @@ with st.sidebar:
     if st.button(">> REFRESH DATA"): st.cache_data.clear()
 
 # --- MAIN DASHBOARD ---
-st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V2</span></h1>", unsafe_allow_html=True)
+st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V3</span></h1>", unsafe_allow_html=True)
 
 # Fetch Data
 daily_data = get_daily_data(asset_info['ticker'])
@@ -363,12 +425,16 @@ macro_regime = get_macro_regime_data(fred_key)
 vol_forecast = calculate_volatility_permission(asset_info['ticker'])
 eco_events = get_economic_calendar(rapid_key)
 
-# New Engines
+# New Quant Engines
 _, ml_prob = get_ml_prediction(asset_info['ticker'])
 gex_df, gex_date = get_gex_profile(asset_info['opt_ticker'], daily_data['Close'].iloc[-1] if not daily_data.empty else 0)
 vol_profile, poc_price = calculate_volume_profile(intraday_data)
 
-# --- 1. OVERVIEW & AI ---
+# Institutional Engines
+hurst = calculate_hurst(daily_data['Close'].values) if not daily_data.empty else 0.5
+regime_data = get_market_regime(asset_info['ticker'])
+
+# --- 1. OVERVIEW & INSTITUTIONAL DASHBOARD ---
 if not daily_data.empty:
     close, high, low = daily_data['Close'], daily_data['High'], daily_data['Low']
     curr = close.iloc[-1]
@@ -377,7 +443,7 @@ if not daily_data.empty:
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("LAST PX", f"{curr:,.2f}", f"{pct:.2f}%")
     
-    # ML WIDGET (STYLED AS TERMINAL)
+    # ML WIDGET
     ml_bias = "BULLISH" if ml_prob > 0.55 else "BEARISH" if ml_prob < 0.45 else "NEUTRAL"
     ml_conf = abs(ml_prob - 0.5) * 200
     ml_color = "bullish" if ml_bias == "BULLISH" else "bearish" if ml_bias == "BEARISH" else "neutral"
@@ -390,16 +456,28 @@ if not daily_data.empty:
     </div>
     """, unsafe_allow_html=True)
     
-    # MACRO WIDGET
-    if macro_regime:
-        bias_color = "bullish" if macro_regime['bias'] == "BULLISH" else "bearish"
+    # INSTITUTIONAL REGIME WIDGET (REPLACED OLD MACRO BOX)
+    hurst_type = "TRENDING" if hurst > 0.55 else "MEAN REVERT" if hurst < 0.45 else "RANDOM WALK"
+    h_color = "#00ff00" if hurst > 0.55 else "#ff3333" if hurst < 0.45 else "gray"
+    
+    if regime_data:
         c3.markdown(f"""
-        <div class='terminal-box' style="text-align:center; padding:5px;">
-            <div style="font-size:0.8em; color:#ff9900;">MACRO REGIME</div>
-            <span class='{bias_color}'>{macro_regime['bias']}</span>
-            <div style="font-size:0.8em; margin-top:5px; color:#aaa;">REAL RATE: {macro_regime['real_rate']:.2f}%</div>
+        <div class='terminal-box' style="padding:10px;">
+            <div style="font-size:0.8em; color:#ff9900;">QUANT REGIME</div>
+            <div style="font-size:1.1em; font-weight:bold;" class='{regime_data['color']}'>{regime_data['regime']}</div>
+            <hr style='margin:5px 0; border-top:1px solid #333;'>
+            <div style="font-size:0.7em; display:flex; justify-content:space-between;">
+                <span>FRACTAL:</span>
+                <span style="color:{h_color}">{hurst_type}</span>
+            </div>
+             <div style="font-size:0.7em; display:flex; justify-content:space-between;">
+                <span>MACRO:</span>
+                <span>{macro_regime['bias'] if macro_regime else 'N/A'}</span>
+            </div>
         </div>
         """, unsafe_allow_html=True)
+    else:
+        c3.info("Calculating Regime...")
     
     c4.metric("HIGH/LOW", f"{high.max():,.2f} / {low.min():,.2f}")
 
@@ -413,7 +491,7 @@ if not daily_data.empty:
     fig.update_xaxes(rangeslider_visible=False)
     st.plotly_chart(fig, use_container_width=True)
 
-# --- 2. ECONOMIC CALENDAR (KEPT FROM CODE #1) ---
+# --- 2. ECONOMIC CALENDAR (UNCHANGED) ---
 st.markdown("---")
 st.markdown("### 📅 ECONOMIC EVENTS (USD)")
 if eco_events:
@@ -429,7 +507,7 @@ if eco_events:
     if not df_cal.empty: st.dataframe(df_cal, use_container_width=True, hide_index=True)
 else: st.info("NO USD EVENTS SCHEDULED.")
 
-# --- 3. VOLATILITY, KELLY & VOLUME PROFILE (MERGED) ---
+# --- 3. VOLATILITY, KELLY & VOLUME PROFILE (UNCHANGED) ---
 st.markdown("---")
 st.markdown("### ⚡ QUANTITATIVE RISK ANALYSIS")
 
@@ -472,7 +550,7 @@ if not intraday_data.empty and vol_forecast:
             terminal_chart_layout(fig_vp, title="INTRADAY VOLUME PROFILE", height=250)
             st.plotly_chart(fig_vp, use_container_width=True)
 
-# --- 4. INSTITUTIONAL GEX (UPGRADED FROM CODE #2) ---
+# --- 4. INSTITUTIONAL GEX (UNCHANGED) ---
 st.markdown("---")
 st.markdown("### 🏦 INSTITUTIONAL GAMMA EXPOSURE (GEX)")
 
@@ -510,7 +588,7 @@ if gex_df is not None:
 else:
     st.info("NO OPTIONS DATA AVAILABLE OR GEX CALCULATION FAILED.")
 
-# --- 5. MONTE CARLO & SEASONALITY (KEPT FROM CODE #1) ---
+# --- 5. MONTE CARLO & SEASONALITY (UNCHANGED) ---
 st.markdown("---")
 st.markdown("### 🎲 SIMULATION & SEASONALITY")
 s1, s2 = st.columns(2)
@@ -543,8 +621,11 @@ reasons = []
 if ml_prob > 0.55: bias_score += 1; reasons.append(f"AI: Model predicts UP ({ml_prob:.0%})")
 elif ml_prob < 0.45: bias_score -= 1; reasons.append(f"AI: Model predicts DOWN ({ml_prob:.0%})")
 
-if macro_regime and macro_regime['bias'] == "BULLISH": bias_score += 1; reasons.append("MACRO: Real Rates Supportive.")
-elif macro_regime: bias_score -= 1; reasons.append("MACRO: Real Rates Restrictive.")
+# Updated Regime Logic
+if regime_data:
+    if "LOW VOL" in regime_data['regime']: bias_score += 1; reasons.append(f"REGIME: Market is in {regime_data['regime']} (Bullish).")
+    elif "HIGH VOL" in regime_data['regime']: bias_score -= 1; reasons.append(f"REGIME: Market is in {regime_data['regime']} (Bearish/Crisis).")
+    else: reasons.append(f"REGIME: Market is in {regime_data['regime']} (Neutral/Chop).")
 
 if gex_df is not None:
     if gex_df['gex'].sum() > 0: reasons.append("GEX: Dealers Long Gamma (Expect Range/Low Vol).")
