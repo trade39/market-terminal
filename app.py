@@ -54,15 +54,11 @@ def get_api_key(key_name):
         return st.secrets[key_name]
     return None
 
-# --- NEW: SENTIMENT LOGIC ENGINE ---
+# --- SENTIMENT LOGIC ENGINE ---
 def parse_eco_value(val_str):
-    """Converts strings like '3.5%', '200K' to floats for comparison"""
     if not isinstance(val_str, str) or val_str == '': return None
-    
-    # Remove common non-numeric chars
     clean = val_str.replace('%', '').replace(',', '')
     multiplier = 1.0
-    
     if 'K' in clean.upper():
         multiplier = 1000.0
         clean = clean.upper().replace('K', '')
@@ -72,62 +68,35 @@ def parse_eco_value(val_str):
     elif 'B' in clean.upper():
         multiplier = 1000000000.0
         clean = clean.upper().replace('B', '')
-        
     try:
         return float(clean) * multiplier
     except:
         return None
 
 def analyze_event_impact(event_name, val_main, val_compare, is_actual):
-    """
-    Determines Bullish/Bearish/Mean Reverting based on event type.
-    val_main: Actual (if happened) or Forecast (if upcoming)
-    val_compare: Forecast (if happened) or Previous (if upcoming)
-    """
     v1 = parse_eco_value(val_main)
     v2 = parse_eco_value(val_compare)
-    
     if v1 is None or v2 is None: return "Neutral"
-
-    # Define Event Logic (True = Higher is Bullish for USD)
-    # Note: Most "Good News" is Bullish USD. Unemployment is inverse.
     usd_logic = {
         "CPI": True, "PPI": True, "Non-Farm": True, "GDP": True, 
         "Sales": True, "Confidence": True, "Rates": True,
         "Unemployment": False, "Claims": False
     }
-    
-    # Default to "Higher is Bullish USD" if unknown
     is_direct = True 
     for key, val in usd_logic.items():
         if key.lower() in event_name.lower():
             is_direct = val
             break
-            
-    # Calculate Deviation
     delta = v1 - v2
     pct_diff = 0
     if v2 != 0: pct_diff = abs(delta / v2)
-    
-    # MEAN REVERTING LOGIC: If values are extremely close (< 1% diff), assume priced in/neutral
-    # For percentages (like 3.4% vs 3.5%), we look at absolute diff
     is_percentage_data = "%" in str(val_main)
     is_mean_reverting = False
-    
-    if is_percentage_data and abs(delta) < 0.05: is_mean_reverting = True # e.g. 3.4 vs 3.4
-    elif not is_percentage_data and pct_diff < 0.01: is_mean_reverting = True # e.g. 200k vs 201k
-    
-    if is_mean_reverting:
-        return "Mean Reverting (Neutral)"
-    
-    # DIRECTIONAL LOGIC
-    if delta > 0: # Higher than expected/prev
-        if is_direct: return "USD Bullish"
-        else: return "USD Bearish"
-    elif delta < 0: # Lower than expected/prev
-        if is_direct: return "USD Bearish"
-        else: return "USD Bullish"
-    
+    if is_percentage_data and abs(delta) < 0.05: is_mean_reverting = True 
+    elif not is_percentage_data and pct_diff < 0.01: is_mean_reverting = True 
+    if is_mean_reverting: return "Mean Reverting (Neutral)"
+    if delta > 0: return "USD Bullish" if is_direct else "USD Bearish"
+    elif delta < 0: return "USD Bearish" if is_direct else "USD Bullish"
     return "Mean Reverting"
 
 # --- DATA FETCHING ---
@@ -135,7 +104,8 @@ def analyze_event_impact(event_name, val_main, val_compare, is_actual):
 @st.cache_data(ttl=60)
 def get_daily_data(ticker):
     try:
-        data = yf.download(ticker, period="2y", interval="1d", progress=False)
+        # UPDATED to 10y for better Seasonality Stats
+        data = yf.download(ticker, period="10y", interval="1d", progress=False)
         return data
     except Exception:
         return pd.DataFrame()
@@ -159,27 +129,16 @@ def get_news(api_key, query):
     except Exception as e:
         return f"Error: {str(e)}"
 
-# --- NEW: ECONOMIC CALENDAR FUNCTION ---
 @st.cache_data(ttl=3600)
 def get_economic_calendar(api_key):
-    """Fetches Economic Calendar from RapidAPI for TODAY"""
     if not api_key: return None
-    
     url = "https://forex-factory-scraper1.p.rapidapi.com/get_calendar_details"
     now = datetime.now()
-    
     querystring = {
-        "year": str(now.year),
-        "month": str(now.month),
-        "day": str(now.day),
-        "currency": "USD",
-        "event_name": "ALL",
-        "timezone": "GMT-05:00 Eastern Time (US & Canada)",
-        "time_format": "12h"
+        "year": str(now.year), "month": str(now.month), "day": str(now.day),
+        "currency": "USD", "event_name": "ALL", "timezone": "GMT-05:00 Eastern Time (US & Canada)", "time_format": "12h"
     }
-    
     headers = {"x-rapidapi-host": "forex-factory-scraper1.p.rapidapi.com", "x-rapidapi-key": api_key}
-    
     try:
         response = requests.get(url, headers=headers, params=querystring)
         data = response.json()
@@ -209,31 +168,23 @@ def calculate_volatility_permission(ticker):
     try:
         df = yf.download(ticker, period="1y", interval="1d", progress=False)
         if df.empty: return None
-        
         if isinstance(df.columns, pd.MultiIndex):
             high, low, close = df['High'].iloc[:, 0], df['Low'].iloc[:, 0], df['Close'].iloc[:, 0]
         else:
             high, low, close = df['High'], df['Low'], df['Close']
-            
         prev_close = close.shift(1)
         tr = pd.concat([high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
         tr_pct = (tr / close) * 100
         tr_pct = tr_pct.dropna()
-        
         log_tr = np.log(tr_pct)
         forecast_log = log_tr.ewm(alpha=0.94).mean().iloc[-1]
         forecast_tr = np.exp(forecast_log)
-        
         baseline_series = tr_pct.rolling(20).mean()
         baseline = baseline_series.iloc[-1]
-        
         return {
-            "forecast": forecast_tr,
-            "baseline": baseline,
+            "forecast": forecast_tr, "baseline": baseline,
             "signal": "TRADE PERMITTED" if forecast_tr > baseline else "NO TRADE / CAUTION",
-            "is_go": forecast_tr > baseline,
-            "history": tr_pct,
-            "baseline_history": baseline_series
+            "is_go": forecast_tr > baseline, "history": tr_pct, "baseline_history": baseline_series
         }
     except: return None
 
@@ -259,27 +210,73 @@ def get_options_pdf(opt_ticker):
         return {"strikes": strikes_smooth, "pdf": pdf, "peak": peak_price, "date": target_exp}
     except: return None
 
+# --- NEW: COMPREHENSIVE SEASONALITY STATS ---
 @st.cache_data(ttl=3600)
-def get_day_of_week_stats(daily_data):
+def get_seasonality_stats(daily_data):
+    """Calculates Day, Week, and Month Seasonality"""
     try:
         df = daily_data.copy()
         if isinstance(df.columns, pd.MultiIndex): df = df.droplevel(1, axis=1)
+        
+        # 1. Prepare Date Features
+        df['Year'] = df.index.year
+        df['Month'] = df.index.month
         df['Week_Num'] = df.index.to_period('W')
+        df['Day'] = df.index.day
         df['Day_Name'] = df.index.day_name()
+        
+        # Calculate "Week of Month" (Simple: 1-4/5)
+        df['Week_of_Month'] = (df['Day'] - 1) // 7 + 1
+        
+        stats = {}
+
+        # --- A. DAY OF WEEK STATS ---
+        # Only use full weeks for accurate count
         valid_weeks = df['Week_Num'].value_counts()
         valid_weeks = valid_weeks[valid_weeks >= 2].index
-        df = df[df['Week_Num'].isin(valid_weeks)]
-        weekly_groups = df.groupby('Week_Num')
-        high_days = df.loc[weekly_groups['High'].idxmax()]['Day_Name']
-        low_days = df.loc[weekly_groups['Low'].idxmin()]['Day_Name']
+        df_weeks = df[df['Week_Num'].isin(valid_weeks)]
+        
+        weekly_groups = df_weeks.groupby('Week_Num')
+        high_days = df_weeks.loc[weekly_groups['High'].idxmax()]['Day_Name']
+        low_days = df_weeks.loc[weekly_groups['Low'].idxmin()]['Day_Name']
+        
         days_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']
-        high_counts = high_days.value_counts().reindex(days_order, fill_value=0)
-        low_counts = low_days.value_counts().reindex(days_order, fill_value=0)
-        total_weeks = len(high_days)
-        high_pct = (high_counts / total_weeks) * 100
-        low_pct = (low_counts / total_weeks) * 100
-        return high_pct, low_pct, total_weeks
-    except: return None, None, 0
+        stats['day_high'] = high_days.value_counts().reindex(days_order, fill_value=0) / len(high_days) * 100
+        stats['day_low'] = low_days.value_counts().reindex(days_order, fill_value=0) / len(low_days) * 100
+        
+        # --- B. WEEK OF MONTH STATS ---
+        # Group by Year-Month to find Monthly High/Low
+        monthly_groups = df.groupby(['Year', 'Month'])
+        
+        m_high_idx = monthly_groups['High'].idxmax()
+        m_low_idx = monthly_groups['Low'].idxmin()
+        
+        week_highs = df.loc[m_high_idx]['Week_of_Month'].value_counts().sort_index()
+        week_lows = df.loc[m_low_idx]['Week_of_Month'].value_counts().sort_index()
+        
+        # Normalize to %
+        stats['week_high'] = week_highs / week_highs.sum() * 100
+        stats['week_low'] = week_lows / week_lows.sum() * 100
+        
+        # --- C. MONTH OF YEAR STATS ---
+        # Group by Year to find Yearly High/Low
+        yearly_groups = df.groupby(['Year'])
+        
+        y_high_idx = yearly_groups['High'].idxmax()
+        y_low_idx = yearly_groups['Low'].idxmin()
+        
+        month_names = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
+        
+        # We need to map the result to month names
+        m_high_counts = df.loc[y_high_idx].index.month_name().value_counts().reindex(month_names, fill_value=0)
+        m_low_counts = df.loc[y_low_idx].index.month_name().value_counts().reindex(month_names, fill_value=0)
+        
+        stats['month_high'] = m_high_counts # Raw counts better for yearly (small sample size)
+        stats['month_low'] = m_low_counts
+        
+        return stats
+    except Exception as e:
+        return None
 
 # --- TECHNICAL CALCULATIONS ---
 
@@ -343,7 +340,6 @@ with st.sidebar:
     fred_key = get_api_key("fred_api_key")
     google_key = get_api_key("google_api_key")
     rapid_key = get_api_key("rapidapi_key")
-    
     st.caption(f"Keys: News {'✅' if news_key else '❌'} | FRED {'✅' if fred_key else '❌'} | Rapid {'✅' if rapid_key else '❌'}")
     if st.button("Refresh Data"): st.cache_data.clear()
 
@@ -388,12 +384,11 @@ if not daily_data.empty:
     fig.update_layout(height=400, template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', xaxis_rangeslider_visible=False)
     st.plotly_chart(fig, use_container_width=True)
 
-# --- 2. ECONOMIC CALENDAR (WITH SENTIMENT) ---
+# --- 2. ECONOMIC CALENDAR ---
 st.markdown("---")
 st.subheader("📅 Today's Economic Events (USD)")
 
 if eco_events:
-    # 1. Parse & Analyze Data
     cal_data = []
     for event in eco_events:
         impact = event.get('impact', 'Low')
@@ -402,62 +397,32 @@ if eco_events:
         forecast = event.get('forecast', '')
         previous = event.get('previous', '')
         
-        # 2. Generate Smart Context Logic
         context_msg = ""
-        sentiment = "Neutral"
-        
-        # CASE A: Event has happened (Actual exists)
         if actual and actual != '':
             bias = analyze_event_impact(name, actual, forecast, is_actual=True)
-            if forecast and forecast != '':
-                context_msg = f"Act: {actual} vs Fcst: {forecast} ({bias})"
-            else:
-                context_msg = f"Act: {actual} (No Fcst)"
-                
-        # CASE B: Event upcoming (No Actual, but Forecast exists)
+            if forecast and forecast != '': context_msg = f"Act: {actual} vs Fcst: {forecast} ({bias})"
+            else: context_msg = f"Act: {actual} (No Fcst)"
         elif forecast and forecast != '':
             bias = analyze_event_impact(name, forecast, previous, is_actual=False)
-            if previous and previous != '':
-                context_msg = f"Fcst: {forecast} vs Prev: {previous} ({bias})"
-            else:
-                context_msg = f"Fcst: {forecast}"
-                
-        # CASE C: No data
-        else:
-            context_msg = "Waiting for data..."
+            if previous and previous != '': context_msg = f"Fcst: {forecast} vs Prev: {previous} ({bias})"
+            else: context_msg = f"Fcst: {forecast}"
+        else: context_msg = "Waiting for data..."
 
-        cal_data.append({
-            "Time": event.get('time', 'N/A'),
-            "Currency": event.get('currency', 'USD'),
-            "Event": name,
-            "Impact": impact,
-            "Analysis": context_msg # <--- Merged Column for Cleanliness
-        })
+        cal_data.append({"Time": event.get('time', 'N/A'), "Event": name, "Impact": impact, "Analysis": context_msg})
     
     df_cal = pd.DataFrame(cal_data)
-    
     if not df_cal.empty:
-        # Style the dataframe: Color code Impact and Analysis
         def highlight_cols(val):
             if 'High' in str(val): return 'color: #ff4b4b; font-weight: bold;'
             if 'Bullish' in str(val): return 'color: #00ff00;'
             if 'Bearish' in str(val): return 'color: #ff4b4b;'
             if 'Mean Reverting' in str(val): return 'color: #cccccc;'
             return ''
-
-        st.dataframe(
-            df_cal[['Time', 'Event', 'Impact', 'Analysis']].style.map(highlight_cols),
-            use_container_width=True,
-            hide_index=True
-        )
-    else:
-        st.info("✅ No USD events scheduled for today.")
-
+        st.dataframe(df_cal.style.map(highlight_cols), use_container_width=True, hide_index=True)
+    else: st.info("✅ No USD events scheduled for today.")
 else:
-    if not rapid_key:
-        st.warning("⚠️ **Missing API Key:** Please add `rapidapi_key` to your `secrets.toml` file.")
-    else:
-        st.info("ℹ️ No Data Found Today (Check if Market is Closed).")
+    if not rapid_key: st.warning("⚠️ **Missing API Key:** Please add `rapidapi_key` to your `secrets.toml` file.")
+    else: st.info("ℹ️ No Data Found Today.")
 
 # --- 3. VOLATILITY & INTRADAY ---
 st.markdown("---")
@@ -470,7 +435,6 @@ if not intraday_data.empty and vol_forecast:
         badge_class = "vol-go" if vol_forecast['is_go'] else "vol-stop"
         st.markdown(f"<span class='{badge_class}'>{vol_forecast['signal']}</span>", unsafe_allow_html=True)
         st.markdown(f"<div style='font-size:0.9em; margin-top:5px;'>Expected: {vol_forecast['forecast']:.2f}%<br><span style='color:gray'>Base: {vol_forecast['baseline']:.2f}%</span></div>", unsafe_allow_html=True)
-
     with v2:
         hist_tr = vol_forecast['history'].tail(40)
         hist_base = vol_forecast['baseline_history'].tail(40)
@@ -492,21 +456,41 @@ if not intraday_data.empty and vol_forecast:
     with col_dash2: st.metric("Volume Trend", "Rising" if i_vol.tail(3).mean() > i_vol.mean() else "Falling")
     with col_dash3: st.metric("Gap %", f"{((open_p.iloc[-1] - close.iloc[-2])/close.iloc[-2]*100):.2f}%")
 
-# --- 4. SEASONALITY ---
+# --- 4. TIME-BASED SEASONALITY (UPDATED) ---
 st.markdown("---")
-st.subheader("📅 Day-of-Week Seasonality")
-high_pct, low_pct, total_weeks = get_day_of_week_stats(daily_data)
-if high_pct is not None:
-    s_col1, s_col2 = st.columns([3, 1])
-    with s_col1:
-        fig_season = go.Figure()
-        fig_season.add_trace(go.Bar(x=high_pct.index, y=high_pct.values, name='Weekly High', marker_color='#00ff00', opacity=0.7))
-        fig_season.add_trace(go.Bar(x=low_pct.index, y=low_pct.values, name='Weekly Low', marker_color='#ff4b4b', opacity=0.7))
-        fig_season.update_layout(title=f"Weekly Extremes (Last {total_weeks} Weeks)", yaxis_title="Freq (%)", barmode='group', template="plotly_dark", height=350, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
-        st.plotly_chart(fig_season, use_container_width=True)
-    with s_col2:
-        st.markdown(f"**High Day:** `{high_pct.idxmax()}`")
-        st.markdown(f"**Low Day:** `{low_pct.idxmax()}`")
+st.subheader("📅 Time-Based Seasonality")
+season_stats = get_seasonality_stats(daily_data)
+
+if season_stats:
+    # We use Tabs for better organization
+    tab1, tab2, tab3 = st.tabs(["Day of Week", "Week of Month", "Month of Year"])
+    
+    with tab1:
+        # Day of Week Chart
+        fig_d = go.Figure()
+        fig_d.add_trace(go.Bar(x=season_stats['day_high'].index, y=season_stats['day_high'].values, name='Weekly High', marker_color='#00ff00', opacity=0.7))
+        fig_d.add_trace(go.Bar(x=season_stats['day_low'].index, y=season_stats['day_low'].values, name='Weekly Low', marker_color='#ff4b4b', opacity=0.7))
+        fig_d.update_layout(title="Weekly Extremes Distribution", barmode='group', template="plotly_dark", height=300, paper_bgcolor='rgba(0,0,0,0)')
+        st.plotly_chart(fig_d, use_container_width=True)
+        st.caption("Shows which Day of the Week typically prints the Weekly High/Low.")
+        
+    with tab2:
+        # Week of Month Chart
+        fig_w = go.Figure()
+        fig_w.add_trace(go.Bar(x=["Week 1", "Week 2", "Week 3", "Week 4", "Week 5"], y=season_stats['week_high'].values, name='Monthly High', marker_color='#00ff00', opacity=0.7))
+        fig_w.add_trace(go.Bar(x=["Week 1", "Week 2", "Week 3", "Week 4", "Week 5"], y=season_stats['week_low'].values, name='Monthly Low', marker_color='#ff4b4b', opacity=0.7))
+        fig_w.update_layout(title="Monthly Extremes by Week", barmode='group', template="plotly_dark", height=300, paper_bgcolor='rgba(0,0,0,0)')
+        st.plotly_chart(fig_w, use_container_width=True)
+        st.caption("Shows which Week (1st-5th) typically prints the Monthly High/Low.")
+
+    with tab3:
+        # Month of Year Chart
+        fig_m = go.Figure()
+        fig_m.add_trace(go.Bar(x=season_stats['month_high'].index, y=season_stats['month_high'].values, name='Yearly High', marker_color='#00ff00', opacity=0.7))
+        fig_m.add_trace(go.Bar(x=season_stats['month_low'].index, y=season_stats['month_low'].values, name='Yearly Low', marker_color='#ff4b4b', opacity=0.7))
+        fig_m.update_layout(title="Yearly Extremes by Month (10Y History)", barmode='group', template="plotly_dark", height=300, paper_bgcolor='rgba(0,0,0,0)')
+        st.plotly_chart(fig_m, use_container_width=True)
+        st.caption("Shows which Month typically prints the High/Low of the entire Year.")
 
 # --- 5. INSTITUTIONAL EXPECTATIONS & CONTEXT ---
 st.markdown("---")
@@ -522,7 +506,8 @@ if options_pdf:
         st.plotly_chart(fig_opt, use_container_width=True)
     with op_col2:
         st.markdown(f"**Target:** `${options_pdf['peak']:.2f}`")
-        st.markdown(f"**Skew:** `{'Bullish' if options_pdf['peak'] > curr else 'Bearish'}`")
+        skew_txt = 'Bullish' if options_pdf['peak'] > curr else 'Bearish'
+        st.markdown(f"**Skew:** `{skew_txt}`")
 
 pred_dates, pred_paths = generate_monte_carlo(daily_data)
 pc1, pc2 = st.columns(2)
@@ -539,3 +524,56 @@ with pc2:
         fig_heat = px.imshow(corr_data.corr(), text_auto=True, color_continuous_scale='RdBu_r', aspect="auto")
         fig_heat.update_layout(template="plotly_dark", height=350, paper_bgcolor='rgba(0,0,0,0)', title="Asset Correlations")
         st.plotly_chart(fig_heat, use_container_width=True)
+
+# --- 6. CONCLUSION (NEW SECTION) ---
+st.markdown("---")
+st.subheader("🏁 Executive Summary")
+
+# Determine Final Bias
+bias_score = 0
+reasons = []
+
+# 1. Macro
+if macro_regime:
+    if macro_regime['bias'] == "BULLISH": 
+        bias_score += 1
+        reasons.append("Macro Environment (Real Rates) is Supportive.")
+    else: 
+        bias_score -= 1
+        reasons.append("Macro Environment (Real Rates) is Restrictive.")
+
+# 2. Volatility
+if vol_forecast and vol_forecast['is_go']:
+    reasons.append("Volatility Forecast supports breakout/trend strategies.")
+else:
+    reasons.append("Volatility Forecast suggests chop/consolidation (Caution).")
+
+# 3. Options
+if options_pdf:
+    if options_pdf['peak'] > curr:
+        bias_score += 1
+        reasons.append(f"Options Market is positioning for higher prices (${options_pdf['peak']:.0f}).")
+    else:
+        bias_score -= 1
+        reasons.append(f"Options Market is positioning for lower prices (${options_pdf['peak']:.0f}).")
+
+# Final Output
+final_color = "neutral"
+final_text = "NEUTRAL / MIXED"
+if bias_score > 0: 
+    final_text = "BULLISH BIAS"
+    final_color = "bullish"
+elif bias_score < 0: 
+    final_text = "BEARISH BIAS"
+    final_color = "bearish"
+
+st.markdown(f"""
+<div style="padding: 20px; border: 1px solid #444; border-radius: 10px; background-color: #1e1e1e;">
+    <h2 style="text-align:center; margin-top:0;">{selected_asset} Outlook: <span class='{final_color}'>{final_text}</span></h2>
+    <hr>
+    <ul>
+        {''.join([f'<li>{r}</li>' for r in reasons])}
+    </ul>
+    <p style="text-align:center; font-size:0.9em; color:gray;"><i>*Generated algorithmically based on Macro, Volatility, and Option Flows.</i></p>
+</div>
+""", unsafe_allow_html=True)
