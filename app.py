@@ -68,7 +68,7 @@ ASSETS = {
     "S&P 500": {"ticker": "^GSPC", "opt_ticker": "SPY", "news_query": "S&P 500"},
     "NASDAQ": {"ticker": "^IXIC", "opt_ticker": "QQQ", "news_query": "Nasdaq"},
     "EUR/USD": {"ticker": "EURUSD=X", "opt_ticker": None, "news_query": "EURUSD"}, 
-    "Bitcoin": {"ticker": "BTC-USD", "opt_ticker": "BITO", "news_query": "Bitcoin"} # Added BITO for BTC Options
+    "Bitcoin": {"ticker": "BTC-USD", "opt_ticker": "BITO", "news_query": "Bitcoin"}
 }
 
 # Mapping for cot_reports library (Legacy Futures Names)
@@ -189,7 +189,6 @@ def get_gex_profile(opt_ticker):
             if not hist.empty:
                 spot_price = hist['Close'].iloc[-1]
             else:
-                # Fallback to fast_info if history fails
                 spot_price = tk.fast_info.last_price
         except:
             return None, None, None
@@ -200,7 +199,6 @@ def get_gex_profile(opt_ticker):
         exps = tk.options
         if not exps: return None, None, None
         
-        # Try to get the next expiration (better liquidity), fallback to first if only 1 exists
         if len(exps) > 1:
             target_exp = exps[1] 
         else:
@@ -216,31 +214,25 @@ def get_gex_profile(opt_ticker):
         r = 0.045
         exp_date = datetime.strptime(target_exp, "%Y-%m-%d")
         days_to_exp = (exp_date - datetime.now()).days
-        # Prevent division by zero if expiring today
         T = 0.001 if days_to_exp <= 0 else days_to_exp / 365.0
         
         gex_data = []
         strikes = sorted(list(set(calls['strike'].tolist() + puts['strike'].tolist())))
         
         for K in strikes:
-            # 5. Filter Strikes (Keep it tight to avoid noise: +/- 25% of spot)
             if K < spot_price * 0.75 or K > spot_price * 1.25: continue
             
-            # Call Data
             c_row = calls[calls['strike'] == K]
             c_oi = c_row['openInterest'].iloc[0] if not c_row.empty else 0
             c_iv = c_row['impliedVolatility'].iloc[0] if not c_row.empty and 'impliedVolatility' in c_row.columns else 0.2
             
-            # Put Data
             p_row = puts[puts['strike'] == K]
             p_oi = p_row['openInterest'].iloc[0] if not p_row.empty else 0
             p_iv = p_row['impliedVolatility'].iloc[0] if not p_row.empty and 'impliedVolatility' in p_row.columns else 0.2
             
-            # 6. Calculate Gamma
             c_gamma = calculate_black_scholes_gamma(spot_price, K, T, r, c_iv)
             p_gamma = calculate_black_scholes_gamma(spot_price, K, T, r, p_iv)
             
-            # Net Gamma
             net_gex = (c_gamma * c_oi - p_gamma * p_oi) * spot_price * 100
             gex_data.append({"strike": K, "gex": net_gex})
             
@@ -249,7 +241,6 @@ def get_gex_profile(opt_ticker):
             
         return df, target_exp, spot_price 
     except Exception as e:
-        # st.error(f"Debug GEX Error: {e}") # Uncomment to see error in app
         return None, None, None
 
 # --- 4. VOLUME PROFILE ENGINE ---
@@ -270,28 +261,23 @@ def calculate_volume_profile(df, bins=50):
 def get_seasonality_stats(daily_data, ticker_name):
     stats = {}
     try:
-        # 1. Day of Week Stats
         df = daily_data.copy()
         df['Week_Num'] = df.index.to_period('W')
         high_days = df.groupby('Week_Num')['High'].idxmax().apply(lambda x: df.loc[x].name.day_name())
         days_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']
         stats['day_high'] = high_days.value_counts().reindex(days_order, fill_value=0) / len(high_days) * 100
 
-        # 2. Week of Month Stats
         df['Day'] = df.index.day
         df['Month_Week'] = np.ceil(df['Day'] / 7).astype(int)
         df['Returns'] = df['Close'].pct_change()
         week_stats = df.groupby('Month_Week')['Returns'].mean() * 100
         stats['week_returns'] = week_stats
 
-        # 3. Hourly Stats (Specific Windows - New York Time)
         try:
-            # Fetch 60 days of 1h data
             intra = yf.download(ticker_name, period="60d", interval="1h", progress=False)
             intra = flatten_dataframe(intra)
             
             if not intra.empty:
-                # Convert to NY Time
                 if intra.index.tz is None:
                     intra.index = intra.index.tz_localize('UTC')
                 intra.index = intra.index.tz_convert('America/New_York')
@@ -299,7 +285,6 @@ def get_seasonality_stats(daily_data, ticker_name):
                 intra['Hour'] = intra.index.hour
                 intra['Return'] = intra['Close'].pct_change()
                 
-                # Requested windows
                 target_hours = [2,3,4,5,6, 8,9,10,11, 14,15,16,17,18, 20,21,22,23]
                 
                 hourly_perf = intra[intra['Hour'].isin(target_hours)].groupby('Hour')['Return'].mean() * 100
@@ -323,7 +308,8 @@ def generate_monte_carlo(stock_data, days=126, simulations=1000):
     for t in range(1, days + 1): price_paths[t] = price_paths[t - 1] * daily_returns[t - 1]
     return pd.date_range(start=close.index[-1], periods=days + 1, freq='B'), price_paths
 
-# --- 6. NEWS & ECONOMICS ---
+# --- 6. NEWS & ECONOMICS (UPDATED WITH FOREX FACTORY) ---
+
 def parse_eco_value(val_str):
     if not isinstance(val_str, str) or val_str == '': return None
     clean = val_str.replace('%', '').replace(',', '')
@@ -369,7 +355,7 @@ def analyze_eco_context(actual_str, forecast_str, previous_str):
     return context_str, bias
 
 @st.cache_data(ttl=3600)
-def get_financial_news(api_key, query="Finance"):
+def get_financial_news_general(api_key, query="Finance"):
     if not api_key: return []
     try:
         newsapi = NewsApiClient(api_key=api_key)
@@ -381,22 +367,85 @@ def get_financial_news(api_key, query="Finance"):
         return articles
     except: return []
 
+@st.cache_data(ttl=300)
+def get_forex_factory_news(api_key, news_type='breaking'):
+    """
+    Fetches news from Forex Factory Scraper via RapidAPI.
+    Types: 'breaking', 'fundamental', 'hottest'
+    """
+    if not api_key: return []
+    
+    base_url = "https://forex-factory-scraper1.p.rapidapi.com/"
+    endpoints = {
+        'breaking': "latest_breaking_news",
+        'fundamental': "latest_fundamental_analysis_news",
+        'hottest': "latest_hottest_news"
+    }
+    
+    url = base_url + endpoints.get(news_type, "latest_breaking_news")
+    headers = {
+        "x-rapidapi-key": api_key,
+        "x-rapidapi-host": "forex-factory-scraper1.p.rapidapi.com"
+    }
+    
+    try:
+        response = requests.get(url, headers=headers)
+        data = response.json()
+        
+        # Normalize data structure based on FF Scraper response
+        normalized_news = []
+        if isinstance(data, list):
+            for item in data[:8]: # Limit to 8 items
+                # The API returns different keys depending on endpoint, handle gracefully
+                title = item.get('title', 'No Title')
+                link = item.get('link', item.get('url', '#'))
+                # Some endpoints might put date in different keys
+                date_str = item.get('date', item.get('time', 'Recent'))
+                
+                normalized_news.append({
+                    "title": title,
+                    "url": link,
+                    "source": "ForexFactory",
+                    "time": date_str
+                })
+        return normalized_news
+    except Exception as e:
+        return []
+
 @st.cache_data(ttl=3600)
 def get_economic_calendar(api_key):
     if not api_key: return None
-    url = "https://forex-factory-scraper1.p.rapidapi.com/get_calendar_details"
+    # UPDATED ENDPOINT: get_real_time_calendar_details
+    url = "https://forex-factory-scraper1.p.rapidapi.com/get_real_time_calendar_details"
+    
     now = datetime.now()
-    querystring = {"year": str(now.year), "month": str(now.month), "day": str(now.day)}
-    headers = {"x-rapidapi-host": "forex-factory-scraper1.p.rapidapi.com", "x-rapidapi-key": api_key}
+    # Dynamic parameters for the current day
+    querystring = {
+        "calendar": "Forex",
+        "year": str(now.year),
+        "month": str(now.month),
+        "day": str(now.day),
+        "currency": "ALL",
+        "event_name": "ALL",
+        "timezone": "GMT-04:00 Eastern Time (US & Canada)", # Align with NY
+        "time_format": "12h"
+    }
+    
+    headers = {
+        "x-rapidapi-host": "forex-factory-scraper1.p.rapidapi.com", 
+        "x-rapidapi-key": api_key
+    }
     
     try:
         response = requests.get(url, headers=headers, params=querystring)
         data = response.json()
+        # Handle cases where data might be nested
         raw_events = data if isinstance(data, list) else data.get('data', [])
         
         filtered_events = []
         for e in raw_events:
-            if e.get('currency') == 'USD' and e.get('impact') == 'High':
+            # Filter for High Impact and USD (or Global keys)
+            if e.get('currency') == 'USD' and (e.get('impact') == 'High' or e.get('impact') == 'Medium'):
                 filtered_events.append(e)
         return filtered_events
     except: return []
@@ -621,6 +670,10 @@ with st.sidebar:
     asset_info = ASSETS[selected_asset]
     
     st.markdown("---")
+    st.markdown("**NEWS SOURCE**")
+    news_source_pref = st.radio("Provider:", ["NewsAPI (General)", "ForexFactory (Specific)"])
+    
+    st.markdown("---")
     st.markdown("**MACRO CORRELATIONS (20D)**")
     corrs = get_correlations(asset_info['ticker'])
     if not corrs.empty:
@@ -651,7 +704,12 @@ st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <sp
 daily_data = get_daily_data(asset_info['ticker'])
 intraday_data = get_intraday_data(asset_info['ticker'])
 eco_events = get_economic_calendar(rapid_key)
-news_items = get_financial_news(news_key, query=asset_info.get('news_query', 'Finance'))
+
+# Fetch News based on selection
+if "ForexFactory" in news_source_pref:
+    news_items = [] # We handle this inside the tabs in the main UI to allow switching types
+else:
+    news_items = get_financial_news_general(news_key, query=asset_info.get('news_query', 'Finance'))
 
 # Engines
 _, ml_prob = get_ml_prediction(asset_info['ticker'])
@@ -797,16 +855,42 @@ with col_eco:
 
 with col_news:
     st.markdown(f"### 📰 {asset_info.get('news_query', 'LATEST')} WIRE")
-    if news_items:
-        for news in news_items:
-            st.markdown(f"""
-            <div style="border-bottom:1px solid #333; padding-bottom:10px; margin-bottom:10px;">
-                <a class='news-link' href='{news['url']}' target='_blank'>▶ {news['title']}</a><br>
-                <span style='font-size:0.7em; color:gray;'>{news['source']} | {news['time'][:10]}</span>
-            </div>
-            """, unsafe_allow_html=True)
+    
+    if "ForexFactory" in news_source_pref:
+        # TABS FOR NEW ENDPOINTS
+        tab_break, tab_fund, tab_hot = st.tabs(["BREAKING", "FUNDAMENTAL", "HOTTEST"])
+        
+        def render_news(n_items):
+            if n_items:
+                for news in n_items:
+                    st.markdown(f"""
+                    <div style="border-bottom:1px solid #333; padding-bottom:5px; margin-bottom:5px;">
+                        <a class='news-link' href='{news['url']}' target='_blank'>▶ {news['title']}</a><br>
+                        <span style='font-size:0.7em; color:gray;'>{news['time']}</span>
+                    </div>
+                    """, unsafe_allow_html=True)
+            else:
+                st.markdown("<div style='color:gray;'>No data available.</div>", unsafe_allow_html=True)
+
+        with tab_break:
+            render_news(get_forex_factory_news(rapid_key, 'breaking'))
+        with tab_fund:
+            render_news(get_forex_factory_news(rapid_key, 'fundamental'))
+        with tab_hot:
+            render_news(get_forex_factory_news(rapid_key, 'hottest'))
+            
     else:
-        st.markdown("<div style='color:gray;'>NO NEWS FEED AVAILABLE</div>", unsafe_allow_html=True)
+        # Standard NewsAPI Feed
+        if news_items:
+            for news in news_items:
+                st.markdown(f"""
+                <div style="border-bottom:1px solid #333; padding-bottom:10px; margin-bottom:10px;">
+                    <a class='news-link' href='{news['url']}' target='_blank'>▶ {news['title']}</a><br>
+                    <span style='font-size:0.7em; color:gray;'>{news['source']} | {news['time'][:10]}</span>
+                </div>
+                """, unsafe_allow_html=True)
+        else:
+            st.markdown("<div style='color:gray;'>NO NEWS FEED AVAILABLE</div>", unsafe_allow_html=True)
 
 # --- 4. RISK ANALYSIS & BACKTEST ---
 st.markdown("---")
