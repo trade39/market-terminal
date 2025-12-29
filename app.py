@@ -11,10 +11,10 @@ from datetime import datetime, timedelta
 from scipy.stats import norm
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.mixture import GaussianMixture
-import os # Added for environment variable fallback
+import os
 
 # --- APP CONFIGURATION ---
-st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V3.95", page_icon="💹")
+st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V4.0", page_icon="💹")
 
 # --- BLOOMBERG TERMINAL STYLING (CSS) ---
 st.markdown("""
@@ -56,6 +56,7 @@ st.markdown("""
     /* News Link */
     .news-link { color: #00e6ff; text-decoration: none; font-size: 0.9em; }
     .news-link:hover { text-decoration: underline; color: #ff9900; }
+    
     /* UI Elements */
     .stSelectbox > div > div { border-radius: 0px; background-color: #111; color: white; border: 1px solid #444; }
     .stTextInput > div > div > input { color: white; background-color: #111; border: 1px solid #444; }
@@ -67,13 +68,14 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- CONSTANTS & MAPPINGS ---
+# --- CONSTANTS & MAPPINGS (UPDATED WITH COINGECKO IDs) ---
 ASSETS = {
-    "Gold (Comex)": {"ticker": "GC=F", "opt_ticker": "GLD", "news_query": "Gold Price"},
-    "S&P 500": {"ticker": "^GSPC", "opt_ticker": "SPY", "news_query": "S&P 500"},
-    "NASDAQ": {"ticker": "^IXIC", "opt_ticker": "QQQ", "news_query": "Nasdaq"},
-    "EUR/USD": {"ticker": "EURUSD=X", "opt_ticker": None, "news_query": "EURUSD"}, 
-    "Bitcoin": {"ticker": "BTC-USD", "opt_ticker": "BITO", "news_query": "Bitcoin"}
+    "Gold (Comex)": {"ticker": "GC=F", "opt_ticker": "GLD", "news_query": "Gold Price", "cg_id": None},
+    "S&P 500": {"ticker": "^GSPC", "opt_ticker": "SPY", "news_query": "S&P 500", "cg_id": None},
+    "NASDAQ": {"ticker": "^IXIC", "opt_ticker": "QQQ", "news_query": "Nasdaq", "cg_id": None},
+    "EUR/USD": {"ticker": "EURUSD=X", "opt_ticker": None, "news_query": "EURUSD", "cg_id": None}, 
+    "Bitcoin": {"ticker": "BTC-USD", "opt_ticker": "BITO", "news_query": "Bitcoin", "cg_id": "bitcoin"},
+    "Ethereum": {"ticker": "ETH-USD", "opt_ticker": "ETHE", "news_query": "Ethereum", "cg_id": "ethereum"}
 }
 
 # Mapping for cot_reports library (Legacy Futures Names)
@@ -82,31 +84,22 @@ COT_MAPPING = {
     "S&P 500": {"name": "E-MINI S&P 500 - CHICAGO MERCANTILE EXCHANGE"},
     "NASDAQ": {"name": "NASDAQ-100 CONSOLIDATED - CHICAGO MERCANTILE EXCHANGE"},
     "EUR/USD": {"name": "EURO FX - CHICAGO MERCANTILE EXCHANGE"},
-    "Bitcoin": {"name": "BITCOIN - CHICAGO MERCANTILE EXCHANGE"}
+    "Bitcoin": {"name": "BITCOIN - CHICAGO MERCANTILE EXCHANGE"},
+    "Ethereum": {"name": "ETHER - CHICAGO MERCANTILE EXCHANGE"}
 }
 
 # --- HELPER FUNCTIONS ---
 def get_api_key(key_name):
-    """
-    Robust API Key Fetcher.
-    Checks:
-    1. st.secrets["api_keys"][key_name] (Nested)
-    2. st.secrets[key_name] (Root)
-    3. Alternative common names (e.g. GOOGLE_API_KEY for Gemini)
-    4. os.environ (Environment Variable fallback)
-    """
     # 1. Check Streamlit Secrets (Nested & Root)
     if "api_keys" in st.secrets and key_name in st.secrets["api_keys"]:
         return st.secrets["api_keys"][key_name]
     if key_name in st.secrets:
         return st.secrets[key_name]
     
-    # 2. Check for common aliases (Helpful if user named it GOOGLE_API_KEY)
+    # 2. Check for common aliases
     if key_name == "gemini_api_key":
-        if "GOOGLE_API_KEY" in st.secrets:
-            return st.secrets["GOOGLE_API_KEY"]
-        if "google_api_key" in st.secrets:
-            return st.secrets["google_api_key"]
+        if "GOOGLE_API_KEY" in st.secrets: return st.secrets["GOOGLE_API_KEY"]
+        if "google_api_key" in st.secrets: return st.secrets["google_api_key"]
             
     # 3. Check OS Environment (Local dev fallback)
     if key_name in os.environ:
@@ -121,6 +114,41 @@ def flatten_dataframe(df):
         df.columns = df.columns.get_level_values(0)
     df = df.loc[:, ~df.columns.duplicated()]
     return df
+
+# --- COINGECKO API ENGINE (NEW) ---
+@st.cache_data(ttl=300) # Cache for 5 mins to respect 30 calls/min limit
+def get_coingecko_stats(cg_id, api_key):
+    """Fetches fundamental data from CoinGecko Demo API."""
+    if not cg_id or not api_key: return None
+    
+    url = f"https://api.coingecko.com/api/v3/coins/{cg_id}"
+    params = {
+        "localization": "false",
+        "tickers": "false",
+        "market_data": "true",
+        "community_data": "true",
+        "developer_data": "true",
+        "sparkline": "false"
+    }
+    
+    # Header specifically for Demo API
+    headers = {"x-cg-demo-api-key": api_key}
+    
+    try:
+        response = requests.get(url, params=params, headers=headers)
+        if response.status_code == 200:
+            data = response.json()
+            return {
+                "rank": data.get('market_cap_rank', 'N/A'),
+                "sentiment": data.get('sentiment_votes_up_percentage', 50),
+                "hashing": data.get('hashing_algorithm', 'N/A'),
+                "ath": data['market_data']['ath']['usd'],
+                "ath_change": data['market_data']['ath_change_percentage']['usd'],
+                "desc": data.get('description', {}).get('en', '').split('.')[0] + "." # First sentence
+            }
+        return None
+    except Exception as e:
+        return None
 
 # --- 1. QUANT ENGINE (GMM + HURST) ---
 def calculate_hurst(series, lags=range(2, 20)):
@@ -195,7 +223,7 @@ def get_ml_prediction(ticker):
         return model, prob_up
     except: return None, 0.5
 
-# --- 3. GAMMA EXPOSURE ENGINE (FIXED & ROBUST) ---
+# --- 3. GAMMA EXPOSURE ENGINE ---
 def calculate_black_scholes_gamma(S, K, T, r, sigma):
     if T <= 0 or sigma <= 0: return 0
     d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
@@ -218,6 +246,7 @@ def get_gex_profile(opt_ticker):
         except:
             return None, None, None
         if spot_price is None: return None, None, None
+
         # 2. Robust Expiration Fetch
         exps = tk.options
         if not exps: return None, None, None
@@ -278,7 +307,7 @@ def calculate_volume_profile(df, bins=50):
     poc_price = vol_profile.loc[poc_idx, 'PriceLevel']
     return vol_profile, poc_price
 
-# --- 5. MONTE CARLO & ADVANCED SEASONALITY ---
+# --- 5. MONTE CARLO & SEASONALITY ---
 @st.cache_data(ttl=3600)
 def get_seasonality_stats(daily_data, ticker_name):
     stats = {}
@@ -479,10 +508,6 @@ def get_economic_calendar(api_key):
 # --- ROBUST GEMINI LLM INTEGRATION ---
 @st.cache_data(ttl=900) # Cache for 15 mins
 def get_llm_analysis(news_list, asset_name, api_key):
-    """
-    Sends news headlines to Google Gemini for sentiment analysis.
-    Includes fallbacks for model versioning errors (404s).
-    """
     if not api_key or not news_list:
         return "No API key or News data available for analysis."
     
@@ -772,21 +797,23 @@ with st.sidebar:
     # API KEY HANDLING
     rapid_key = get_api_key("rapidapi_key")
     news_key = get_api_key("news_api_key")
-    gemini_key = get_api_key("gemini_api_key") # Hardcoded from Secrets
+    gemini_key = get_api_key("gemini_api_key")
+    cg_key = get_api_key("coingecko_key") # Fetch CoinGecko Key
     
     st.markdown(f"""
     <div style='font-size:0.8em; color:gray; font-family:Courier New;'>
     API STATUS:<br>
     RAPID: {'[OK]' if rapid_key else '[FAIL]'}<br>
     NEWS: {'[OK]' if news_key else '[FAIL]'}<br>
-    GEMINI: {'[OK]' if gemini_key else '[FAIL]'}
+    GEMINI: {'[OK]' if gemini_key else '[FAIL]'}<br>
+    GECKO: {'[OK]' if cg_key else '[FAIL]'}
     </div>
     """, unsafe_allow_html=True)
     
     if st.button(">> REFRESH DATA"): st.cache_data.clear()
 
 # --- MAIN DASHBOARD ---
-st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V3.9</span></h1>", unsafe_allow_html=True)
+st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V4.0</span></h1>", unsafe_allow_html=True)
 
 # Fetch Data
 daily_data = get_daily_data(asset_info['ticker'])
@@ -855,6 +882,52 @@ if not daily_data.empty:
     terminal_chart_layout(fig, height=400)
     fig.update_xaxes(rangeslider_visible=False)
     st.plotly_chart(fig, use_container_width=True)
+
+# --- 1B. COINGECKO INTEGRATION (NEW) ---
+cg_id = asset_info.get('cg_id')
+if cg_id and cg_key:
+    st.markdown("---")
+    st.markdown("### 🦎 COINGECKO FUNDAMENTALS")
+    
+    with st.spinner("Fetching CoinGecko Data..."):
+        cg_data = get_coingecko_stats(cg_id, cg_key)
+    
+    if cg_data:
+        c_cg1, c_cg2, c_cg3, c_cg4 = st.columns(4)
+        
+        c_cg1.metric("Market Rank", f"#{cg_data['rank']}")
+        
+        ath_color = "red" if cg_data['ath_change'] < -20 else "orange"
+        c_cg2.markdown(f"""
+        <div class='terminal-box'>
+            <div style='font-size:0.8em; color:gray;'>ATH DRAWDOWN</div>
+            <div style='color:{ath_color}; font-size:1.2em;'>{cg_data['ath_change']:.2f}%</div>
+            <div style='font-size:0.7em;'>High: ${cg_data['ath']:,.0f}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        sent_val = cg_data['sentiment']
+        sent_color = "#00ff00" if sent_val > 60 else "#ff3333" if sent_val < 40 else "gray"
+        c_cg3.markdown(f"""
+        <div class='terminal-box'>
+            <div style='font-size:0.8em; color:gray;'>COMMUNITY SENTIMENT</div>
+            <div style='color:{sent_color}; font-size:1.2em;'>{sent_val}% Bullish</div>
+            <progress value="{sent_val}" max="100" style="width:100%; height:5px;"></progress>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        c_cg4.markdown(f"""
+        <div class='terminal-box'>
+            <div style='font-size:0.8em; color:gray;'>ALGORITHM</div>
+            <div style='color:white; font-size:1em;'>{cg_data['hashing']}</div>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        with st.expander("Asset Description"):
+            st.write(cg_data['desc'])
+    else:
+        st.warning("CoinGecko API Rate Limit hit or ID invalid.")
+
 
 # --- 2. INTRADAY TACTICAL FEED ---
 st.markdown("---")
@@ -1074,7 +1147,7 @@ pred_dates, pred_paths = generate_monte_carlo(daily_data)
 # Pass ticker to updated function for Hourly Data fetch
 stats = get_seasonality_stats(daily_data, asset_info['ticker']) 
 
-# --- 1. SEASONALITY TABS (NOW FULL WIDTH & ON TOP) ---
+# --- 1. SEASONALITY TABS ---
 if stats:
     st.markdown("#### ⏳ SEASONAL TENDENCIES")
     tab_hour, tab_day, tab_week = st.tabs(["HOUR (NY)", "DAY", "WEEK"])
@@ -1108,7 +1181,7 @@ if stats:
 
 st.markdown("---")
 
-# --- 2. MONTE CARLO (NOW FULL WIDTH & BELOW) ---
+# --- 2. MONTE CARLO ---
 st.markdown("#### 🎲 MONTE CARLO PROJECTION")
 fig_pred = go.Figure()
 hist_slice = daily_data['Close'].tail(90)
@@ -1165,7 +1238,7 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-# --- NEW: GEMINI INSIGHT BOX ---
+# --- GEMINI INSIGHT BOX ---
 if gemini_key and (news_general or news_ff):
     st.markdown("#### 🧠 GEMINI INSIGHT (MULTI-SOURCE ANALYSIS)")
     with st.spinner("Analyzing combined news feeds..."):
