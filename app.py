@@ -54,7 +54,6 @@ st.markdown("""
     /* News Link */
     .news-link { color: #00e6ff; text-decoration: none; font-size: 0.9em; }
     .news-link:hover { text-decoration: underline; color: #ff9900; }
-
     /* UI Elements */
     .stSelectbox > div > div { border-radius: 0px; background-color: #111; color: white; border: 1px solid #444; }
     button { border-radius: 0px !important; border: 1px solid #ff9900 !important; color: #ff9900 !important; background: black !important; }
@@ -81,7 +80,6 @@ COT_MAPPING = {
 }
 
 # --- HELPER FUNCTIONS ---
-
 def get_api_key(key_name):
     if "api_keys" in st.secrets and key_name in st.secrets["api_keys"]:
         return st.secrets["api_keys"][key_name]
@@ -192,9 +190,7 @@ def get_gex_profile(opt_ticker):
                 spot_price = tk.fast_info.last_price
         except:
             return None, None, None
-
         if spot_price is None: return None, None, None
-
         # 2. Robust Expiration Fetch
         exps = tk.options
         if not exps: return None, None, None
@@ -209,7 +205,6 @@ def get_gex_profile(opt_ticker):
         calls, puts = chain.calls, chain.puts
         
         if calls.empty or puts.empty: return None, None, None
-
         # 4. Parameters
         r = 0.045
         exp_date = datetime.strptime(target_exp, "%Y-%m-%d")
@@ -266,13 +261,11 @@ def get_seasonality_stats(daily_data, ticker_name):
         high_days = df.groupby('Week_Num')['High'].idxmax().apply(lambda x: df.loc[x].name.day_name())
         days_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']
         stats['day_high'] = high_days.value_counts().reindex(days_order, fill_value=0) / len(high_days) * 100
-
         df['Day'] = df.index.day
         df['Month_Week'] = np.ceil(df['Day'] / 7).astype(int)
         df['Returns'] = df['Close'].pct_change()
         week_stats = df.groupby('Month_Week')['Returns'].mean() * 100
         stats['week_returns'] = week_stats
-
         try:
             intra = yf.download(ticker_name, period="60d", interval="1h", progress=False)
             intra = flatten_dataframe(intra)
@@ -308,8 +301,7 @@ def generate_monte_carlo(stock_data, days=126, simulations=1000):
     for t in range(1, days + 1): price_paths[t] = price_paths[t - 1] * daily_returns[t - 1]
     return pd.date_range(start=close.index[-1], periods=days + 1, freq='B'), price_paths
 
-# --- 6. NEWS & ECONOMICS (UPDATED WITH FOREX FACTORY) ---
-
+# --- 6. NEWS & ECONOMICS (UPDATED WITH BACKUP) ---
 def parse_eco_value(val_str):
     if not isinstance(val_str, str) or val_str == '': return None
     clean = val_str.replace('%', '').replace(',', '')
@@ -351,7 +343,6 @@ def analyze_eco_context(actual_str, forecast_str, previous_str):
             elif delta > 0: bias = "Bullish Exp."
             else: bias = "Bearish Exp."
         else: context_str = "Waiting for Data..."
-
     return context_str, bias
 
 @st.cache_data(ttl=3600)
@@ -414,44 +405,98 @@ def get_forex_factory_news(api_key, news_type='breaking'):
 
 @st.cache_data(ttl=3600)
 def get_economic_calendar(api_key):
+    """
+    Fetches economic calendar.
+    Priority 1: Forex Factory Scraper
+    Priority 2: Ultimate Economic Calendar (Backup)
+    """
     if not api_key: return None
-    # UPDATED ENDPOINT: get_real_time_calendar_details
-    url = "https://forex-factory-scraper1.p.rapidapi.com/get_real_time_calendar_details"
     
-    now = datetime.now()
-    # Dynamic parameters for the current day
-    querystring = {
-        "calendar": "Forex",
-        "year": str(now.year),
-        "month": str(now.month),
-        "day": str(now.day),
-        "currency": "ALL",
-        "event_name": "ALL",
-        "timezone": "GMT-04:00 Eastern Time (US & Canada)", # Align with NY
-        "time_format": "12h"
-    }
-    
-    headers = {
-        "x-rapidapi-host": "forex-factory-scraper1.p.rapidapi.com", 
-        "x-rapidapi-key": api_key
-    }
-    
+    # --- PRIMARY: Forex Factory Scraper ---
     try:
+        url = "https://forex-factory-scraper1.p.rapidapi.com/get_real_time_calendar_details"
+        now = datetime.now()
+        querystring = {
+            "calendar": "Forex",
+            "year": str(now.year),
+            "month": str(now.month),
+            "day": str(now.day),
+            "currency": "ALL",
+            "event_name": "ALL",
+            "timezone": "GMT-04:00 Eastern Time (US & Canada)",
+            "time_format": "12h"
+        }
+        headers = {
+            "x-rapidapi-host": "forex-factory-scraper1.p.rapidapi.com", 
+            "x-rapidapi-key": api_key
+        }
+        
         response = requests.get(url, headers=headers, params=querystring)
         data = response.json()
-        # Handle cases where data might be nested
         raw_events = data if isinstance(data, list) else data.get('data', [])
         
         filtered_events = []
         for e in raw_events:
-            # Filter for High Impact and USD (or Global keys)
+            # Filter for High/Medium Impact and USD
             if e.get('currency') == 'USD' and (e.get('impact') == 'High' or e.get('impact') == 'Medium'):
                 filtered_events.append(e)
-        return filtered_events
-    except: return []
+        
+        if filtered_events:
+            return filtered_events
+
+    except Exception as e:
+        pass # Fall through to backup
+
+    # --- BACKUP: Ultimate Economic Calendar ---
+    try:
+        url = "https://ultimate-economic-calendar.p.rapidapi.com/economic-events/tradingview"
+        now_str = datetime.now().strftime("%Y-%m-%d")
+        
+        querystring = {"from": now_str, "to": now_str, "countries": "US"}
+        headers = {
+            "x-rapidapi-key": api_key,
+            "x-rapidapi-host": "ultimate-economic-calendar.p.rapidapi.com"
+        }
+        
+        response = requests.get(url, headers=headers, params=querystring)
+        data = response.json()
+        
+        # Normalize backup data to match Forex Factory structure
+        backup_events = []
+        if isinstance(data, list):
+            for e in data:
+                # Basic normalization of fields
+                time_raw = e.get('date', '') # Usually ISO
+                try:
+                    dt_obj = datetime.fromisoformat(time_raw.replace('Z', '+00:00'))
+                    time_display = dt_obj.strftime("%I:%M%p")
+                except:
+                    time_display = time_raw
+
+                # Only High/Med importance
+                imp_score = e.get('importance', 0)
+                if imp_score is None: imp_score = 0
+                
+                # TradingView: -1 to 1 range usually, or 0-3. We filter low noise.
+                # Assuming simple mapping if exists, else take all USD
+                
+                formatted_event = {
+                    "time": time_display,
+                    "event_name": e.get('title', 'Event'),
+                    "actual": str(e.get('actual', '')),
+                    "forecast": str(e.get('forecast', '')),
+                    "previous": str(e.get('previous', '')),
+                    "currency": "USD",
+                    "impact": "Medium/High" # Generic for backup
+                }
+                backup_events.append(formatted_event)
+        
+        return backup_events
+        
+    except Exception as e:
+        return []
 
 # --- 7. INSTITUTIONAL FEATURES ---
-
 # A. BACKTEST ENGINE
 @st.cache_data(ttl=300)
 def run_strategy_backtest(ticker):
@@ -459,7 +504,6 @@ def run_strategy_backtest(ticker):
         df = yf.download(ticker, period="2y", interval="1d", progress=False)
         df = flatten_dataframe(df)
         if df.empty: return None
-
         df['Returns'] = df['Close'].pct_change()
         df['Range'] = df['High'] - df['Low']
         df['TR'] = pd.concat([df['Range'], (df['High'] - df['Close'].shift(1)).abs(), (df['Low'] - df['Close'].shift(1)).abs()], axis=1).max(axis=1)
@@ -613,7 +657,6 @@ def get_cot_data(asset_name):
             asset_df = df[df['Market_and_Exchange_Names'] == contract_name].copy()
             
         if asset_df.empty: return None
-
         # Sort
         asset_df['Date'] = pd.to_datetime(asset_df['As_of_Date_In_Form_YYMMDD'], format='%y%m%d')
         latest = asset_df.sort_values('Date').iloc[-1]
@@ -758,7 +801,7 @@ if not daily_data.empty:
         c3.info("Calculating Regime...")
     
     c4.metric("HIGH/LOW", f"{high.max():,.2f} / {low.min():,.2f}")
-
+    
     fig = go.Figure()
     fig.add_trace(go.Candlestick(x=daily_data.index, open=daily_data['Open'], high=high, low=low, close=close, name="Price"))
     if poc_price:
@@ -770,12 +813,10 @@ if not daily_data.empty:
 # --- 2. INTRADAY TACTICAL FEED ---
 st.markdown("---")
 st.markdown("### 🔭 INTRADAY TACTICAL FEED")
-
 rs_data = get_relative_strength(asset_info['ticker'])
 key_levels = get_key_levels(daily_data)
 
 col_intra_1, col_intra_2 = st.columns([2, 1])
-
 with col_intra_1:
     if not rs_data.empty:
         curr_rs = rs_data['RS_Score'].iloc[-1]
@@ -803,7 +844,7 @@ with col_intra_2:
             if dist < 0.002: return "#ffff00" # Near
             if level > current: return "#ff3333" # Resistance
             return "#00ff00" # Support
-
+        
         levels_list = [
             ("R1 (Resist)", key_levels['R1']),
             ("PDH (High)", key_levels['PDH']),
@@ -826,7 +867,7 @@ st.markdown("---")
 col_eco, col_news = st.columns([2, 1])
 
 with col_eco:
-    st.markdown("### 📅 ECONOMIC EVENTS (USD | HIGH)")
+    st.markdown("### 📅 ECONOMIC EVENTS (USD)")
     if eco_events:
         cal_data = []
         for event in eco_events:
@@ -841,13 +882,14 @@ with col_eco:
             cal_data.append({"TIME": time_str, "EVENT": name, "DATA CONTEXT": context, "BIAS": bias})
             
         df_cal = pd.DataFrame(cal_data)
+        
         def color_bias(val):
             color = 'white'
             if 'Bullish' in val: color = '#00ff00' 
             elif 'Bearish' in val: color = '#ff3333'
             elif 'Mean' in val: color = '#cccc00'
             return f'color: {color}'
-
+        
         if not df_cal.empty: 
             st.dataframe(df_cal.style.map(color_bias, subset=['BIAS']), use_container_width=True, hide_index=True)
     else: 
@@ -871,7 +913,7 @@ with col_news:
                     """, unsafe_allow_html=True)
             else:
                 st.markdown("<div style='color:gray;'>No data available.</div>", unsafe_allow_html=True)
-
+        
         with tab_break:
             render_news(get_forex_factory_news(rapid_key, 'breaking'))
         with tab_fund:
@@ -895,7 +937,6 @@ with col_news:
 # --- 4. RISK ANALYSIS & BACKTEST ---
 st.markdown("---")
 st.markdown("### ⚡ QUANTITATIVE RISK & EXECUTION")
-
 strat_perf = run_strategy_backtest(asset_info['ticker'])
 
 if not intraday_data.empty and strat_perf:
@@ -911,7 +952,7 @@ if not intraday_data.empty and strat_perf:
         ret_color = "#00ff00" if strat_perf['return'] > 0 else "#ff3333"
         st.metric("Total Return", f"{strat_perf['return']*100:.1f}%")
         st.metric("Sharpe Ratio", f"{strat_perf['sharpe']:.2f}")
-
+        
     with q2:
         # Equity Curve
         ec_df = pd.DataFrame({
@@ -923,7 +964,7 @@ if not intraday_data.empty and strat_perf:
         fig_perf.add_trace(go.Scatter(x=ec_df.index, y=ec_df['Strategy'], name="Active Strat", line=dict(color='#00e6ff', width=2)))
         terminal_chart_layout(fig_perf, title="STRATEGY EDGE VALIDATION", height=300)
         st.plotly_chart(fig_perf, use_container_width=True)
-
+        
     with q3:
         if vol_profile is not None:
             fig_vp = go.Figure()
@@ -954,14 +995,13 @@ if not vwap_df.empty:
         fig_vwap.add_hline(y=key_levels['PDH'], line_dash="dot", line_color="#ff3333", annotation_text="PDH")
         fig_vwap.add_hline(y=key_levels['PDL'], line_dash="dot", line_color="#00ff00", annotation_text="PDL")
         fig_vwap.add_hline(y=key_levels['Pivot'], line_width=1, line_color="#00e6ff", annotation_text="DAILY PIVOT")
-
+    
     terminal_chart_layout(fig_vwap, height=500)
     st.plotly_chart(fig_vwap, use_container_width=True)
 
 # --- 6. GEX ---
 st.markdown("---")
 st.markdown("### 🏦 INSTITUTIONAL GAMMA EXPOSURE (GEX)")
-
 
 if gex_df is not None and gex_spot is not None:
     g1, g2 = st.columns([3, 1])
@@ -1000,7 +1040,6 @@ else:
 # --- 7. MONTE CARLO & ADVANCED SEASONALITY ---
 st.markdown("---")
 st.markdown("### 🎲 SIMULATION & TIME ANALYSIS")
-
 pred_dates, pred_paths = generate_monte_carlo(daily_data)
 # Pass ticker to updated function for Hourly Data fetch
 stats = get_seasonality_stats(daily_data, asset_info['ticker']) 
