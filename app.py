@@ -12,9 +12,10 @@ from scipy.stats import norm
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.mixture import GaussianMixture
 import os
+import time
 
 # --- APP CONFIGURATION ---
-st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V4.0", page_icon="💹")
+st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V4.5", page_icon="💹")
 
 # --- BLOOMBERG TERMINAL STYLING (CSS) ---
 st.markdown("""
@@ -68,14 +69,28 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- CONSTANTS & MAPPINGS (UPDATED WITH COINGECKO IDs) ---
+# --- CONSTANTS & MAPPINGS (EXPANDED LIST) ---
 ASSETS = {
+    # --- MAJOR FOREX/INDICES ---
     "Gold (Comex)": {"ticker": "GC=F", "opt_ticker": "GLD", "news_query": "Gold Price", "cg_id": None},
     "S&P 500": {"ticker": "^GSPC", "opt_ticker": "SPY", "news_query": "S&P 500", "cg_id": None},
     "NASDAQ": {"ticker": "^IXIC", "opt_ticker": "QQQ", "news_query": "Nasdaq", "cg_id": None},
-    "EUR/USD": {"ticker": "EURUSD=X", "opt_ticker": None, "news_query": "EURUSD", "cg_id": None}, 
+    "EUR/USD": {"ticker": "EURUSD=X", "opt_ticker": None, "news_query": "EURUSD", "cg_id": None},
+    
+    # --- CRYPTO L1s ---
     "Bitcoin": {"ticker": "BTC-USD", "opt_ticker": "BITO", "news_query": "Bitcoin", "cg_id": "bitcoin"},
-    "Ethereum": {"ticker": "ETH-USD", "opt_ticker": "ETHE", "news_query": "Ethereum", "cg_id": "ethereum"}
+    "Ethereum": {"ticker": "ETH-USD", "opt_ticker": "ETHE", "news_query": "Ethereum", "cg_id": "ethereum"},
+    "Solana": {"ticker": "SOL-USD", "opt_ticker": None, "news_query": "Solana Crypto", "cg_id": "solana"},
+    "XRP": {"ticker": "XRP-USD", "opt_ticker": None, "news_query": "Ripple XRP", "cg_id": "ripple"},
+    "BNB": {"ticker": "BNB-USD", "opt_ticker": None, "news_query": "Binance Coin", "cg_id": "binancecoin"},
+    "Cardano": {"ticker": "ADA-USD", "opt_ticker": None, "news_query": "Cardano ADA", "cg_id": "cardano"},
+    
+    # --- MEME COINS & ALTCOINS ---
+    "Dogecoin": {"ticker": "DOGE-USD", "opt_ticker": None, "news_query": "Dogecoin", "cg_id": "dogecoin"},
+    "Shiba Inu": {"ticker": "SHIB-USD", "opt_ticker": None, "news_query": "Shiba Inu Coin", "cg_id": "shiba-inu"},
+    "Pepe": {"ticker": "PEPE-USD", "opt_ticker": None, "news_query": "Pepe Coin", "cg_id": "pepe"},
+    "Chainlink": {"ticker": "LINK-USD", "opt_ticker": None, "news_query": "Chainlink", "cg_id": "chainlink"},
+    "Polygon": {"ticker": "MATIC-USD", "opt_ticker": None, "news_query": "Polygon MATIC", "cg_id": "matic-network"},
 }
 
 # Mapping for cot_reports library (Legacy Futures Names)
@@ -115,8 +130,8 @@ def flatten_dataframe(df):
     df = df.loc[:, ~df.columns.duplicated()]
     return df
 
-# --- COINGECKO API ENGINE (NEW) ---
-@st.cache_data(ttl=300) # Cache for 5 mins to respect 30 calls/min limit
+# --- COINGECKO API ENGINE (DEMO TIER SAFE) ---
+@st.cache_data(ttl=300) # CACHE: 5 Minutes (Safe for 30 calls/min limit)
 def get_coingecko_stats(cg_id, api_key):
     """Fetches fundamental data from CoinGecko Demo API."""
     if not cg_id or not api_key: return None
@@ -130,8 +145,6 @@ def get_coingecko_stats(cg_id, api_key):
         "developer_data": "true",
         "sparkline": "false"
     }
-    
-    # Header specifically for Demo API
     headers = {"x-cg-demo-api-key": api_key}
     
     try:
@@ -144,11 +157,59 @@ def get_coingecko_stats(cg_id, api_key):
                 "hashing": data.get('hashing_algorithm', 'N/A'),
                 "ath": data['market_data']['ath']['usd'],
                 "ath_change": data['market_data']['ath_change_percentage']['usd'],
-                "desc": data.get('description', {}).get('en', '').split('.')[0] + "." # First sentence
+                "desc": data.get('description', {}).get('en', '').split('.')[0] + "." 
             }
         return None
     except Exception as e:
         return None
+
+# --- LLM ENGINE (FREE TIER OPTIMIZED) ---
+@st.cache_data(ttl=3600) # CACHE: 1 Hour (Prevents hitting Gemini Limits)
+def get_technical_narrative(ticker, price, daily_pct, regime, ml_signal, gex_data, cot_data, levels, api_key):
+    """
+    Sends all technical data to Gemini for a cohesive synthesis.
+    """
+    if not api_key: return "AI Analyst unavailable (No Key)."
+    
+    # Format GEX
+    gex_text = "N/A"
+    if gex_data is not None:
+        total_gex = gex_data['gex'].sum()
+        gex_text = f"Net Gamma: ${total_gex/1_000_000:.1f}M ({'Long/Sticky' if total_gex>0 else 'Short/Volatile'})"
+
+    # Format Levels
+    lvl_text = "N/A"
+    if levels:
+        lvl_text = f"Pivot: {levels['Pivot']:.2f}, R1: {levels['R1']:.2f}, S1: {levels['S1']:.2f}"
+
+    prompt = f"""
+    You are a Senior Portfolio Manager at a Quant Hedge Fund. 
+    Analyze the following technical data for {ticker} and write a 3-bullet executive summary.
+
+    ### MARKET DATA
+    - Price: {price:,.2f} ({daily_pct:.2f}%)
+    - Market Regime: {regime['regime'] if regime else 'Unknown'} (Confidence: {regime['confidence'] if regime else 0:.2f})
+    - ML Algo Forecast: {ml_signal}
+    - Institutional Gamma (GEX): {gex_text}
+    - Smart Money (COT): {cot_data['sentiment'] if cot_data else 'N/A'} (Net Comm: {cot_data['comm_net'] if cot_data else 0:,.0f})
+    - Key Levels: {lvl_text}
+
+    ### TASK
+    1. Synthesize the conflict/confluence between the Regime (Trend), ML (Probability), and GEX (Volatility).
+    2. Identify the key trigger level for a trade based on the 'Key Levels'.
+    3. Give a final "Execution" bias (e.g., "Fade Rallies", "Buy Dips", "Do Nothing").
+    
+    Keep it professional, concise, and jargon-heavy (Bloomberg Terminal style). Do not use markdown bolding.
+    """
+
+    try:
+        genai.configure(api_key=api_key)
+        # Prioritize FLASH model for speed and higher rate limits
+        model = genai.GenerativeModel('gemini-1.5-flash') 
+        response = model.generate_content(prompt)
+        return response.text
+    except Exception as e:
+        return f"AI Analyst unavailable: {str(e)}"
 
 # --- 1. QUANT ENGINE (GMM + HURST) ---
 def calculate_hurst(series, lags=range(2, 20)):
@@ -236,7 +297,6 @@ def get_gex_profile(opt_ticker):
     try:
         tk = yf.Ticker(opt_ticker)
         
-        # 1. Robust Spot Price Fetch
         try:
             hist = tk.history(period="1d")
             if not hist.empty:
@@ -247,7 +307,6 @@ def get_gex_profile(opt_ticker):
             return None, None, None
         if spot_price is None: return None, None, None
 
-        # 2. Robust Expiration Fetch
         exps = tk.options
         if not exps: return None, None, None
         
@@ -256,12 +315,10 @@ def get_gex_profile(opt_ticker):
         else:
             target_exp = exps[0]
             
-        # 3. Fetch Chain
         chain = tk.option_chain(target_exp)
         calls, puts = chain.calls, chain.puts
         
         if calls.empty or puts.empty: return None, None, None
-        # 4. Parameters
         r = 0.045
         exp_date = datetime.strptime(target_exp, "%Y-%m-%d")
         days_to_exp = (exp_date - datetime.now()).days
@@ -401,7 +458,7 @@ def analyze_eco_context(actual_str, forecast_str, previous_str):
         else: context_str = "Waiting for Data..."
     return context_str, bias
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=14400) # CACHE: 4 Hours (Prevents hitting NewsAPI 100/day limit)
 def get_financial_news_general(api_key, query="Finance"):
     if not api_key: return []
     try:
@@ -414,7 +471,7 @@ def get_financial_news_general(api_key, query="Finance"):
         return articles
     except: return []
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=14400) # CACHE: 4 Hours
 def get_forex_factory_news(api_key, news_type='breaking'):
     """Fetches news from Forex Factory Scraper via RapidAPI."""
     if not api_key: return []
@@ -453,7 +510,7 @@ def get_forex_factory_news(api_key, news_type='breaking'):
     except Exception as e:
         return []
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=21600) # CACHE: 6 Hours (Economic Events rarely change intraday)
 def get_economic_calendar(api_key):
     if not api_key: return None
     
@@ -504,68 +561,6 @@ def get_economic_calendar(api_key):
                 })
         return backup_events
     except: return []
-
-# --- ROBUST GEMINI LLM INTEGRATION ---
-@st.cache_data(ttl=900) # Cache for 15 mins
-def get_llm_analysis(news_list, asset_name, api_key):
-    if not api_key or not news_list:
-        return "No API key or News data available for analysis."
-    
-    try:
-        genai.configure(api_key=api_key)
-        
-        # Prepare Prompt
-        headlines = "\n".join([f"- {n['title']} ({n['source']})" for n in news_list])
-        prompt = f"""
-        You are a senior hedge fund analyst. Analyze the following news headlines for {asset_name}.
-        The news is a mix of general finance and specific breaking forex news.
-        
-        HEADLINES:
-        {headlines}
-        
-        TASK:
-        1. Determine the overall sentiment (Bullish, Bearish, or Neutral).
-        2. Provide a concise 2-sentence explanation of the key drivers.
-        3. Identify any specific tail risks mentioned.
-        
-        Format output as:
-        **Sentiment:** [Sentiment]
-        **Rationale:** [Explanation]
-        **Risk:** [Risk]
-        """
-        
-        # Strategy: Try preferred model -> Fallback to legacy -> Fallback to dynamic list
-        
-        # 1. Try Standard Flash Model (Fastest/Cheapest)
-        try:
-            model = genai.GenerativeModel('gemini-1.5-flash')
-            response = model.generate_content(prompt)
-            return response.text
-        except Exception:
-            pass # Continue to fallback
-            
-        # 2. Try Legacy Pro Model (Widely available on older keys)
-        try:
-            model = genai.GenerativeModel('gemini-pro')
-            response = model.generate_content(prompt)
-            return response.text
-        except Exception:
-            pass # Continue to fallback
-
-        # 3. Dynamic Fallback: Find ANY model that supports 'generateContent'
-        try:
-            for m in genai.list_models():
-                if 'generateContent' in m.supported_generation_methods:
-                    model = genai.GenerativeModel(m.name)
-                    response = model.generate_content(prompt)
-                    return response.text
-        except Exception:
-            pass
-
-        return "Error: Could not find a compatible Gemini model. Please check your API Key."
-
-    except Exception as e:
-        return f"AI Analysis Failed: {str(e)}"
 
 # --- 7. INSTITUTIONAL FEATURES ---
 # A. BACKTEST ENGINE
@@ -635,7 +630,7 @@ def calculate_vwap_bands(df):
     return df
 
 # C. INTRADAY RELATIVE STRENGTH
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=300) # Increased TTL for safety
 def get_relative_strength(asset_ticker, benchmark_ticker="SPY"):
     try:
         asset = yf.download(asset_ticker, period="5d", interval="15m", progress=False)
@@ -749,14 +744,14 @@ def get_cot_data(asset_name):
         return None
 
 # --- 8. DATA FETCHERS ---
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=300) # Increased to 5 mins
 def get_daily_data(ticker):
     try:
         data = yf.download(ticker, period="10y", interval="1d", progress=False)
         return flatten_dataframe(data)
     except: return pd.DataFrame()
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=300) # Increased to 5 mins
 def get_intraday_data(ticker):
     try:
         data = yf.download(ticker, period="5d", interval="15m", progress=False)
@@ -798,7 +793,7 @@ with st.sidebar:
     rapid_key = get_api_key("rapidapi_key")
     news_key = get_api_key("news_api_key")
     gemini_key = get_api_key("gemini_api_key")
-    cg_key = get_api_key("coingecko_key") # Fetch CoinGecko Key
+    cg_key = get_api_key("coingecko_key") 
     
     st.markdown(f"""
     <div style='font-size:0.8em; color:gray; font-family:Courier New;'>
@@ -813,7 +808,7 @@ with st.sidebar:
     if st.button(">> REFRESH DATA"): st.cache_data.clear()
 
 # --- MAIN DASHBOARD ---
-st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V4.0</span></h1>", unsafe_allow_html=True)
+st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V4.5</span></h1>", unsafe_allow_html=True)
 
 # Fetch Data
 daily_data = get_daily_data(asset_info['ticker'])
@@ -883,7 +878,7 @@ if not daily_data.empty:
     fig.update_xaxes(rangeslider_visible=False)
     st.plotly_chart(fig, use_container_width=True)
 
-# --- 1B. COINGECKO INTEGRATION (NEW) ---
+# --- 1B. COINGECKO INTEGRATION (DEMO SAFE) ---
 cg_id = asset_info.get('cg_id')
 if cg_id and cg_key:
     st.markdown("---")
@@ -894,7 +889,6 @@ if cg_id and cg_key:
     
     if cg_data:
         c_cg1, c_cg2, c_cg3, c_cg4 = st.columns(4)
-        
         c_cg1.metric("Market Rank", f"#{cg_data['rank']}")
         
         ath_color = "red" if cg_data['ath_change'] < -20 else "orange"
@@ -926,8 +920,7 @@ if cg_id and cg_key:
         with st.expander("Asset Description"):
             st.write(cg_data['desc'])
     else:
-        st.warning("CoinGecko API Rate Limit hit or ID invalid.")
-
+        st.warning("CoinGecko API Limit Reached (30 calls/min). Please wait.")
 
 # --- 2. INTRADAY TACTICAL FEED ---
 st.markdown("---")
@@ -1144,10 +1137,9 @@ else:
 st.markdown("---")
 st.markdown("### 🎲 SIMULATION & TIME ANALYSIS")
 pred_dates, pred_paths = generate_monte_carlo(daily_data)
-# Pass ticker to updated function for Hourly Data fetch
 stats = get_seasonality_stats(daily_data, asset_info['ticker']) 
 
-# --- 1. SEASONALITY TABS ---
+# --- SEASONALITY TABS ---
 if stats:
     st.markdown("#### ⏳ SEASONAL TENDENCIES")
     tab_hour, tab_day, tab_week = st.tabs(["HOUR (NY)", "DAY", "WEEK"])
@@ -1181,7 +1173,7 @@ if stats:
 
 st.markdown("---")
 
-# --- 2. MONTE CARLO ---
+# --- MONTE CARLO ---
 st.markdown("#### 🎲 MONTE CARLO PROJECTION")
 fig_pred = go.Figure()
 hist_slice = daily_data['Close'].tail(90)
@@ -1206,48 +1198,36 @@ if cot_data:
     </div>
     """, unsafe_allow_html=True)
 
-# --- 9. CONCLUSION ---
+# --- 9. INTELLIGENT EXECUTIVE SUMMARY ---
 st.markdown("---")
-st.markdown("### 🏁 EXECUTIVE SUMMARY")
+st.markdown("### 🧠 AI QUANT ANALYST")
 
-bias_score = 0
-reasons = []
+# 1. Prepare Data for LLM
+gex_summary = gex_df if gex_df is not None else None
+ml_signal_str = "BULLISH" if ml_prob > 0.55 else "BEARISH" if ml_prob < 0.45 else "NEUTRAL"
 
-if ml_prob > 0.55: bias_score += 1; reasons.append(f"AI: Model predicts UP ({ml_prob:.0%})")
-elif ml_prob < 0.45: bias_score -= 1; reasons.append(f"AI: Model predicts DOWN ({ml_prob:.0%})")
-
-if regime_data:
-    if "LOW VOL" in regime_data['regime']: bias_score += 1; reasons.append(f"REGIME: {regime_data['regime']}")
-    elif "HIGH VOL" in regime_data['regime']: bias_score -= 1; reasons.append(f"REGIME: {regime_data['regime']}")
-
-if gex_df is not None:
-    if gex_df['gex'].sum() > 0: reasons.append("GEX: Dealers Long Gamma (Expect Range).")
-    else: reasons.append("GEX: Dealers Short Gamma (Expect Breakouts).")
-
-final_text = "BULLISH BIAS" if bias_score > 0 else "BEARISH BIAS" if bias_score < 0 else "NEUTRAL"
-final_color = "bullish" if bias_score > 0 else "bearish" if bias_score < 0 else "neutral"
-
-st.markdown(f"""
-<div class='terminal-box'>
-    <h2 style="text-align:center; margin-top:0; color: #ff9900;">{selected_asset} FINAL OUTLOOK</h2>
-    <div style='text-align:center; margin-bottom:15px;'><span class='{final_color}' style='font-size:1.5em;'>{final_text}</span></div>
-    <hr>
-    <ul style='font-family:Courier New; color:#e0e0e0;'>
-        {''.join([f'<li>{r}</li>' for r in reasons])}
-    </ul>
-</div>
-""", unsafe_allow_html=True)
-
-# --- GEMINI INSIGHT BOX ---
-if gemini_key and (news_general or news_ff):
-    st.markdown("#### 🧠 GEMINI INSIGHT (MULTI-SOURCE ANALYSIS)")
-    with st.spinner("Analyzing combined news feeds..."):
-        ai_analysis = get_llm_analysis(combined_news_for_llm, selected_asset, gemini_key)
-        
+if gemini_key:
+    # Check if we should render the AI section (Lazy Load to save API calls)
+    with st.spinner("👨‍💻 Quant Analyst is synthesizing data..."):
+        # We pass the raw quantitative data to the LLM
+        # CACHED for 15 mins to protect API limits
+        narrative = get_technical_narrative(
+            ticker=selected_asset,
+            price=curr,
+            daily_pct=pct,
+            regime=regime_data,
+            ml_signal=ml_signal_str,
+            gex_data=gex_summary,
+            cot_data=cot_data,
+            levels=key_levels,
+            api_key=gemini_key
+        )
+    
+    # Display the result in a "Chat" style box
     st.markdown(f"""
-    <div class='terminal-box' style='border-left: 5px solid #00e6ff;'>
-        <div style='white-space: pre-wrap; font-family: sans-serif; font-size: 0.9em; line-height: 1.5;'>{ai_analysis}</div>
+    <div class='terminal-box' style='border-left: 4px solid #ff9900;'>
+        <div style='font-family: monospace; font-size: 0.95em; white-space: pre-wrap;'>{narrative}</div>
     </div>
     """, unsafe_allow_html=True)
-elif not gemini_key:
-    st.info("ℹ️ Gemini API Key not found in secrets. AI Analysis disabled.")
+else:
+    st.info("Add GEMINI_API_KEY to see the AI Analyst Report.")
