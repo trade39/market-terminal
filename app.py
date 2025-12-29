@@ -5,7 +5,7 @@ import numpy as np
 import plotly.graph_objects as go
 import requests
 import cot_reports as cot
-import google.generativeai as genai  # NEW: Gemini Library
+import google.generativeai as genai
 from newsapi import NewsApiClient
 from datetime import datetime, timedelta
 from scipy.stats import norm
@@ -451,19 +451,21 @@ def get_economic_calendar(api_key):
         return backup_events
     except: return []
 
-# --- NEW: GEMINI LLM INTEGRATION ---
+# --- NEW: ROBUST GEMINI LLM INTEGRATION ---
 @st.cache_data(ttl=900) # Cache for 15 mins
 def get_llm_analysis(news_list, asset_name, api_key):
-    """Sends news headlines to Google Gemini for sentiment analysis."""
+    """
+    Sends news headlines to Google Gemini for sentiment analysis.
+    Includes fallbacks for model versioning errors (404s).
+    """
     if not api_key or not news_list:
         return "No API key or News data available for analysis."
     
     try:
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-1.5-flash')
         
+        # Prepare Prompt
         headlines = "\n".join([f"- {n['title']}" for n in news_list])
-        
         prompt = f"""
         You are a senior hedge fund analyst. Analyze the following news headlines for {asset_name}.
         
@@ -481,8 +483,36 @@ def get_llm_analysis(news_list, asset_name, api_key):
         **Risk:** [Risk]
         """
         
-        response = model.generate_content(prompt)
-        return response.text
+        # Strategy: Try preferred model -> Fallback to legacy -> Fallback to dynamic list
+        
+        # 1. Try Standard Flash Model (Fastest/Cheapest)
+        try:
+            model = genai.GenerativeModel('gemini-1.5-flash')
+            response = model.generate_content(prompt)
+            return response.text
+        except Exception:
+            pass # Continue to fallback
+            
+        # 2. Try Legacy Pro Model (Widely available on older keys)
+        try:
+            model = genai.GenerativeModel('gemini-pro')
+            response = model.generate_content(prompt)
+            return response.text
+        except Exception:
+            pass # Continue to fallback
+
+        # 3. Dynamic Fallback: Find ANY model that supports 'generateContent'
+        try:
+            for m in genai.list_models():
+                if 'generateContent' in m.supported_generation_methods:
+                    model = genai.GenerativeModel(m.name)
+                    response = model.generate_content(prompt)
+                    return response.text
+        except Exception:
+            pass
+
+        return "Error: Could not find a compatible Gemini model. Please check your API Key."
+
     except Exception as e:
         return f"AI Analysis Failed: {str(e)}"
 
@@ -1120,4 +1150,4 @@ if gemini_key and news_items:
     </div>
     """, unsafe_allow_html=True)
 elif not gemini_key:
-    st.info("ℹ️ Enter Gemini API Key in Sidebar to enable AI News Analysis .")
+    st.info("ℹ️ Enter Gemini API Key in Sidebar to enable AI News Analysis.")
