@@ -13,7 +13,7 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.mixture import GaussianMixture
 
 # --- APP CONFIGURATION ---
-st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V3.8", page_icon="💹")
+st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V3.9", page_icon="💹")
 
 # --- BLOOMBERG TERMINAL STYLING (CSS) ---
 st.markdown("""
@@ -58,6 +58,9 @@ st.markdown("""
     /* UI Elements */
     .stSelectbox > div > div { border-radius: 0px; background-color: #111; color: white; border: 1px solid #444; }
     .stTextInput > div > div > input { color: white; background-color: #111; border: 1px solid #444; }
+    .stTabs [data-baseweb="tab-list"] { gap: 2px; }
+    .stTabs [data-baseweb="tab"] { height: 30px; white-space: pre-wrap; background-color: #111; color: white; border-radius: 0px; border: 1px solid #333;}
+    .stTabs [aria-selected="true"] { background-color: #ff9900; color: black !important; font-weight: bold;}
     button { border-radius: 0px !important; border: 1px solid #ff9900 !important; color: #ff9900 !important; background: black !important; }
     hr { margin: 1em 0; border: 0; border-top: 1px solid #333; }
 </style>
@@ -355,7 +358,7 @@ def get_financial_news_general(api_key, query="Finance"):
         all_articles = newsapi.get_everything(q=query, language='en', sort_by='publishedAt')
         articles = []
         if all_articles['status'] == 'ok':
-            for art in all_articles['articles'][:8]:
+            for art in all_articles['articles'][:6]:
                 articles.append({"title": art['title'], "source": art['source']['name'], "url": art['url'], "time": art['publishedAt']})
         return articles
     except: return []
@@ -384,7 +387,7 @@ def get_forex_factory_news(api_key, news_type='breaking'):
         
         normalized_news = []
         if isinstance(data, list):
-            for item in data[:8]:
+            for item in data[:6]:
                 title = item.get('title', 'No Title')
                 link = item.get('link', item.get('url', '#'))
                 date_str = item.get('date', item.get('time', 'Recent'))
@@ -451,7 +454,7 @@ def get_economic_calendar(api_key):
         return backup_events
     except: return []
 
-# --- NEW: ROBUST GEMINI LLM INTEGRATION ---
+# --- ROBUST GEMINI LLM INTEGRATION ---
 @st.cache_data(ttl=900) # Cache for 15 mins
 def get_llm_analysis(news_list, asset_name, api_key):
     """
@@ -465,9 +468,10 @@ def get_llm_analysis(news_list, asset_name, api_key):
         genai.configure(api_key=api_key)
         
         # Prepare Prompt
-        headlines = "\n".join([f"- {n['title']}" for n in news_list])
+        headlines = "\n".join([f"- {n['title']} ({n['source']})" for n in news_list])
         prompt = f"""
         You are a senior hedge fund analyst. Analyze the following news headlines for {asset_name}.
+        The news is a mix of general finance and specific breaking forex news.
         
         HEADLINES:
         {headlines}
@@ -733,10 +737,7 @@ with st.sidebar:
     asset_info = ASSETS[selected_asset]
     
     st.markdown("---")
-    st.markdown("**NEWS SOURCE**")
-    news_source_pref = st.radio("Provider:", ["NewsAPI (General)", "ForexFactory (Specific)"])
     
-    st.markdown("---")
     st.markdown("**MACRO CORRELATIONS (20D)**")
     corrs = get_correlations(asset_info['ticker'])
     if not corrs.empty:
@@ -749,37 +750,33 @@ with st.sidebar:
     # API KEY HANDLING
     rapid_key = get_api_key("rapidapi_key")
     news_key = get_api_key("news_api_key")
-    
-    # Google Gemini Key Input
-    st.markdown("**GOOGLE GEMINI API**")
-    gemini_key = get_api_key("gemini_api_key")
-    if not gemini_key:
-        gemini_key = st.text_input("Enter Gemini Key:", type="password")
+    gemini_key = get_api_key("gemini_api_key") # Hardcoded from Secrets
     
     st.markdown(f"""
     <div style='font-size:0.8em; color:gray; font-family:Courier New;'>
     API STATUS:<br>
     RAPID: {'[OK]' if rapid_key else '[FAIL]'}<br>
     NEWS: {'[OK]' if news_key else '[FAIL]'}<br>
-    GEMINI: {'[OK]' if gemini_key else '[MANUAL]'}
+    GEMINI: {'[OK]' if gemini_key else '[FAIL]'}
     </div>
     """, unsafe_allow_html=True)
     
     if st.button(">> REFRESH DATA"): st.cache_data.clear()
 
 # --- MAIN DASHBOARD ---
-st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V3.8</span></h1>", unsafe_allow_html=True)
+st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V3.9</span></h1>", unsafe_allow_html=True)
 
 # Fetch Data
 daily_data = get_daily_data(asset_info['ticker'])
 intraday_data = get_intraday_data(asset_info['ticker'])
 eco_events = get_economic_calendar(rapid_key)
 
-# Fetch News based on selection
-if "ForexFactory" in news_source_pref:
-    news_items = get_forex_factory_news(rapid_key, 'breaking')
-else:
-    news_items = get_financial_news_general(news_key, query=asset_info.get('news_query', 'Finance'))
+# Fetch News from BOTH sources
+news_general = get_financial_news_general(news_key, query=asset_info.get('news_query', 'Finance'))
+news_ff = get_forex_factory_news(rapid_key, 'breaking')
+
+# Combine for LLM
+combined_news_for_llm = news_general[:5] + news_ff[:5]
 
 # Engines
 _, ml_prob = get_ml_prediction(asset_info['ticker'])
@@ -925,17 +922,25 @@ with col_eco:
 with col_news:
     st.markdown(f"### 📰 {asset_info.get('news_query', 'LATEST')} WIRE")
     
-    # Display headlines
-    if news_items:
-        for news in news_items:
-            st.markdown(f"""
-            <div style="border-bottom:1px solid #333; padding-bottom:5px; margin-bottom:5px;">
-                <a class='news-link' href='{news['url']}' target='_blank'>▶ {news['title']}</a><br>
-                <span style='font-size:0.7em; color:gray;'>{news['time']}</span>
-            </div>
-            """, unsafe_allow_html=True)
-    else:
-        st.markdown("<div style='color:gray;'>NO NEWS FEED AVAILABLE</div>", unsafe_allow_html=True)
+    # Dual Source Tabs
+    tab_gen, tab_ff = st.tabs(["📰 GENERAL", "⚡ FOREX FACTORY"])
+    
+    def render_news(items):
+        if items:
+            for news in items:
+                st.markdown(f"""
+                <div style="border-bottom:1px solid #333; padding-bottom:5px; margin-bottom:5px;">
+                    <a class='news-link' href='{news['url']}' target='_blank'>▶ {news['title']}</a><br>
+                    <span style='font-size:0.7em; color:gray;'>{news['time']} | {news['source']}</span>
+                </div>
+                """, unsafe_allow_html=True)
+        else:
+            st.markdown("<div style='color:gray;'>No data.</div>", unsafe_allow_html=True)
+            
+    with tab_gen:
+        render_news(news_general)
+    with tab_ff:
+        render_news(news_ff)
 
 # --- 4. RISK ANALYSIS & BACKTEST ---
 st.markdown("---")
@@ -1139,10 +1144,10 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 # --- NEW: GEMINI INSIGHT BOX ---
-if gemini_key and news_items:
-    st.markdown("#### 🧠 GEMINI INSIGHT (HEDGE FUND ANALYST)")
-    with st.spinner("Analyzing news sentiment..."):
-        ai_analysis = get_llm_analysis(news_items, selected_asset, gemini_key)
+if gemini_key and (news_general or news_ff):
+    st.markdown("#### 🧠 GEMINI INSIGHT (MULTI-SOURCE ANALYSIS)")
+    with st.spinner("Analyzing combined news feeds..."):
+        ai_analysis = get_llm_analysis(combined_news_for_llm, selected_asset, gemini_key)
         
     st.markdown(f"""
     <div class='terminal-box' style='border-left: 5px solid #00e6ff;'>
@@ -1150,4 +1155,4 @@ if gemini_key and news_items:
     </div>
     """, unsafe_allow_html=True)
 elif not gemini_key:
-    st.info("ℹ️ Enter Gemini API Key in Sidebar to enable AI News Analysis.")
+    st.info("ℹ️ Gemini API Key not found in secrets. AI Analysis disabled.")
