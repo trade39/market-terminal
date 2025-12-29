@@ -11,9 +11,10 @@ from datetime import datetime, timedelta
 from scipy.stats import norm
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.mixture import GaussianMixture
+import os # Added for environment variable fallback
 
 # --- APP CONFIGURATION ---
-st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V3.9", page_icon="💹")
+st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V3.95", page_icon="💹")
 
 # --- BLOOMBERG TERMINAL STYLING (CSS) ---
 st.markdown("""
@@ -86,10 +87,31 @@ COT_MAPPING = {
 
 # --- HELPER FUNCTIONS ---
 def get_api_key(key_name):
+    """
+    Robust API Key Fetcher.
+    Checks:
+    1. st.secrets["api_keys"][key_name] (Nested)
+    2. st.secrets[key_name] (Root)
+    3. Alternative common names (e.g. GOOGLE_API_KEY for Gemini)
+    4. os.environ (Environment Variable fallback)
+    """
+    # 1. Check Streamlit Secrets (Nested & Root)
     if "api_keys" in st.secrets and key_name in st.secrets["api_keys"]:
         return st.secrets["api_keys"][key_name]
     if key_name in st.secrets:
         return st.secrets[key_name]
+    
+    # 2. Check for common aliases (Helpful if user named it GOOGLE_API_KEY)
+    if key_name == "gemini_api_key":
+        if "GOOGLE_API_KEY" in st.secrets:
+            return st.secrets["GOOGLE_API_KEY"]
+        if "google_api_key" in st.secrets:
+            return st.secrets["google_api_key"]
+            
+    # 3. Check OS Environment (Local dev fallback)
+    if key_name in os.environ:
+        return os.environ[key_name]
+        
     return None
 
 def flatten_dataframe(df):
