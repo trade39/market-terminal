@@ -5,6 +5,7 @@ import numpy as np
 import plotly.graph_objects as go
 import requests
 import cot_reports as cot
+import google.generativeai as genai  # NEW: Gemini Library
 from newsapi import NewsApiClient
 from datetime import datetime, timedelta
 from scipy.stats import norm
@@ -12,7 +13,7 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.mixture import GaussianMixture
 
 # --- APP CONFIGURATION ---
-st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V3.7", page_icon="💹")
+st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V3.8", page_icon="💹")
 
 # --- BLOOMBERG TERMINAL STYLING (CSS) ---
 st.markdown("""
@@ -56,6 +57,7 @@ st.markdown("""
     .news-link:hover { text-decoration: underline; color: #ff9900; }
     /* UI Elements */
     .stSelectbox > div > div { border-radius: 0px; background-color: #111; color: white; border: 1px solid #444; }
+    .stTextInput > div > div > input { color: white; background-color: #111; border: 1px solid #444; }
     button { border-radius: 0px !important; border: 1px solid #ff9900 !important; color: #ff9900 !important; background: black !important; }
     hr { margin: 1em 0; border: 0; border-top: 1px solid #333; }
 </style>
@@ -301,7 +303,7 @@ def generate_monte_carlo(stock_data, days=126, simulations=1000):
     for t in range(1, days + 1): price_paths[t] = price_paths[t - 1] * daily_returns[t - 1]
     return pd.date_range(start=close.index[-1], periods=days + 1, freq='B'), price_paths
 
-# --- 6. NEWS & ECONOMICS (UPDATED WITH BACKUP) ---
+# --- 6. NEWS & ECONOMICS ---
 def parse_eco_value(val_str):
     if not isinstance(val_str, str) or val_str == '': return None
     clean = val_str.replace('%', '').replace(',', '')
@@ -353,17 +355,14 @@ def get_financial_news_general(api_key, query="Finance"):
         all_articles = newsapi.get_everything(q=query, language='en', sort_by='publishedAt')
         articles = []
         if all_articles['status'] == 'ok':
-            for art in all_articles['articles'][:5]:
+            for art in all_articles['articles'][:8]:
                 articles.append({"title": art['title'], "source": art['source']['name'], "url": art['url'], "time": art['publishedAt']})
         return articles
     except: return []
 
 @st.cache_data(ttl=300)
 def get_forex_factory_news(api_key, news_type='breaking'):
-    """
-    Fetches news from Forex Factory Scraper via RapidAPI.
-    Types: 'breaking', 'fundamental', 'hottest'
-    """
+    """Fetches news from Forex Factory Scraper via RapidAPI."""
     if not api_key: return []
     
     base_url = "https://forex-factory-scraper1.p.rapidapi.com/"
@@ -383,14 +382,11 @@ def get_forex_factory_news(api_key, news_type='breaking'):
         response = requests.get(url, headers=headers)
         data = response.json()
         
-        # Normalize data structure based on FF Scraper response
         normalized_news = []
         if isinstance(data, list):
-            for item in data[:8]: # Limit to 8 items
-                # The API returns different keys depending on endpoint, handle gracefully
+            for item in data[:8]:
                 title = item.get('title', 'No Title')
                 link = item.get('link', item.get('url', '#'))
-                # Some endpoints might put date in different keys
                 date_str = item.get('date', item.get('time', 'Recent'))
                 
                 normalized_news.append({
@@ -405,31 +401,17 @@ def get_forex_factory_news(api_key, news_type='breaking'):
 
 @st.cache_data(ttl=3600)
 def get_economic_calendar(api_key):
-    """
-    Fetches economic calendar.
-    Priority 1: Forex Factory Scraper
-    Priority 2: Ultimate Economic Calendar (Backup)
-    """
     if not api_key: return None
     
-    # --- PRIMARY: Forex Factory Scraper ---
+    # Priority 1: Forex Factory
     try:
         url = "https://forex-factory-scraper1.p.rapidapi.com/get_real_time_calendar_details"
         now = datetime.now()
         querystring = {
-            "calendar": "Forex",
-            "year": str(now.year),
-            "month": str(now.month),
-            "day": str(now.day),
-            "currency": "ALL",
-            "event_name": "ALL",
-            "timezone": "GMT-04:00 Eastern Time (US & Canada)",
-            "time_format": "12h"
+            "calendar": "Forex", "year": str(now.year), "month": str(now.month), "day": str(now.day),
+            "currency": "ALL", "event_name": "ALL", "timezone": "GMT-04:00 Eastern Time (US & Canada)", "time_format": "12h"
         }
-        headers = {
-            "x-rapidapi-host": "forex-factory-scraper1.p.rapidapi.com", 
-            "x-rapidapi-key": api_key
-        }
+        headers = {"x-rapidapi-host": "forex-factory-scraper1.p.rapidapi.com", "x-rapidapi-key": api_key}
         
         response = requests.get(url, headers=headers, params=querystring)
         data = response.json()
@@ -437,64 +419,72 @@ def get_economic_calendar(api_key):
         
         filtered_events = []
         for e in raw_events:
-            # Filter for High/Medium Impact and USD
             if e.get('currency') == 'USD' and (e.get('impact') == 'High' or e.get('impact') == 'Medium'):
                 filtered_events.append(e)
-        
-        if filtered_events:
-            return filtered_events
+        if filtered_events: return filtered_events
 
-    except Exception as e:
-        pass # Fall through to backup
+    except: pass 
 
-    # --- BACKUP: Ultimate Economic Calendar ---
+    # Priority 2: Ultimate Economic Calendar (Backup)
     try:
         url = "https://ultimate-economic-calendar.p.rapidapi.com/economic-events/tradingview"
         now_str = datetime.now().strftime("%Y-%m-%d")
-        
         querystring = {"from": now_str, "to": now_str, "countries": "US"}
-        headers = {
-            "x-rapidapi-key": api_key,
-            "x-rapidapi-host": "ultimate-economic-calendar.p.rapidapi.com"
-        }
+        headers = {"x-rapidapi-key": api_key, "x-rapidapi-host": "ultimate-economic-calendar.p.rapidapi.com"}
         
         response = requests.get(url, headers=headers, params=querystring)
         data = response.json()
-        
-        # Normalize backup data to match Forex Factory structure
         backup_events = []
         if isinstance(data, list):
             for e in data:
-                # Basic normalization of fields
-                time_raw = e.get('date', '') # Usually ISO
+                time_raw = e.get('date', '') 
                 try:
                     dt_obj = datetime.fromisoformat(time_raw.replace('Z', '+00:00'))
                     time_display = dt_obj.strftime("%I:%M%p")
-                except:
-                    time_display = time_raw
-
-                # Only High/Med importance
-                imp_score = e.get('importance', 0)
-                if imp_score is None: imp_score = 0
+                except: time_display = time_raw
                 
-                # TradingView: -1 to 1 range usually, or 0-3. We filter low noise.
-                # Assuming simple mapping if exists, else take all USD
-                
-                formatted_event = {
-                    "time": time_display,
-                    "event_name": e.get('title', 'Event'),
-                    "actual": str(e.get('actual', '')),
-                    "forecast": str(e.get('forecast', '')),
-                    "previous": str(e.get('previous', '')),
-                    "currency": "USD",
-                    "impact": "Medium/High" # Generic for backup
-                }
-                backup_events.append(formatted_event)
-        
+                backup_events.append({
+                    "time": time_display, "event_name": e.get('title', 'Event'),
+                    "actual": str(e.get('actual', '')), "forecast": str(e.get('forecast', '')),
+                    "previous": str(e.get('previous', '')), "currency": "USD", "impact": "Medium/High"
+                })
         return backup_events
+    except: return []
+
+# --- NEW: GEMINI LLM INTEGRATION ---
+@st.cache_data(ttl=900) # Cache for 15 mins
+def get_llm_analysis(news_list, asset_name, api_key):
+    """Sends news headlines to Google Gemini for sentiment analysis."""
+    if not api_key or not news_list:
+        return "No API key or News data available for analysis."
+    
+    try:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel('gemini-1.5-flash')
         
+        headlines = "\n".join([f"- {n['title']}" for n in news_list])
+        
+        prompt = f"""
+        You are a senior hedge fund analyst. Analyze the following news headlines for {asset_name}.
+        
+        HEADLINES:
+        {headlines}
+        
+        TASK:
+        1. Determine the overall sentiment (Bullish, Bearish, or Neutral).
+        2. Provide a concise 2-sentence explanation of the key drivers.
+        3. Identify any specific tail risks mentioned.
+        
+        Format output as:
+        **Sentiment:** [Sentiment]
+        **Rationale:** [Explanation]
+        **Risk:** [Risk]
+        """
+        
+        response = model.generate_content(prompt)
+        return response.text
     except Exception as e:
-        return []
+        return f"AI Analysis Failed: {str(e)}"
 
 # --- 7. INSTITUTIONAL FEATURES ---
 # A. BACKTEST ENGINE
@@ -725,23 +715,30 @@ with st.sidebar:
             st.markdown(f"{idx}: <span style='color:{c_color}'>{val:.2f}</span>", unsafe_allow_html=True)
     
     st.markdown("---")
-    fred_key = get_api_key("fred_api_key")
+    
+    # API KEY HANDLING
     rapid_key = get_api_key("rapidapi_key")
     news_key = get_api_key("news_api_key")
+    
+    # Google Gemini Key Input
+    st.markdown("**GOOGLE GEMINI API**")
+    gemini_key = get_api_key("gemini_api_key")
+    if not gemini_key:
+        gemini_key = st.text_input("Enter Gemini Key:", type="password")
     
     st.markdown(f"""
     <div style='font-size:0.8em; color:gray; font-family:Courier New;'>
     API STATUS:<br>
-    FRED: {'[OK]' if fred_key else '[FAIL]'}<br>
     RAPID: {'[OK]' if rapid_key else '[FAIL]'}<br>
-    NEWS: {'[OK]' if news_key else '[FAIL]'}
+    NEWS: {'[OK]' if news_key else '[FAIL]'}<br>
+    GEMINI: {'[OK]' if gemini_key else '[MANUAL]'}
     </div>
     """, unsafe_allow_html=True)
     
     if st.button(">> REFRESH DATA"): st.cache_data.clear()
 
 # --- MAIN DASHBOARD ---
-st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V3.7</span></h1>", unsafe_allow_html=True)
+st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V3.8</span></h1>", unsafe_allow_html=True)
 
 # Fetch Data
 daily_data = get_daily_data(asset_info['ticker'])
@@ -750,7 +747,7 @@ eco_events = get_economic_calendar(rapid_key)
 
 # Fetch News based on selection
 if "ForexFactory" in news_source_pref:
-    news_items = [] # We handle this inside the tabs in the main UI to allow switching types
+    news_items = get_forex_factory_news(rapid_key, 'breaking')
 else:
     news_items = get_financial_news_general(news_key, query=asset_info.get('news_query', 'Finance'))
 
@@ -898,41 +895,17 @@ with col_eco:
 with col_news:
     st.markdown(f"### 📰 {asset_info.get('news_query', 'LATEST')} WIRE")
     
-    if "ForexFactory" in news_source_pref:
-        # TABS FOR NEW ENDPOINTS
-        tab_break, tab_fund, tab_hot = st.tabs(["BREAKING", "FUNDAMENTAL", "HOTTEST"])
-        
-        def render_news(n_items):
-            if n_items:
-                for news in n_items:
-                    st.markdown(f"""
-                    <div style="border-bottom:1px solid #333; padding-bottom:5px; margin-bottom:5px;">
-                        <a class='news-link' href='{news['url']}' target='_blank'>▶ {news['title']}</a><br>
-                        <span style='font-size:0.7em; color:gray;'>{news['time']}</span>
-                    </div>
-                    """, unsafe_allow_html=True)
-            else:
-                st.markdown("<div style='color:gray;'>No data available.</div>", unsafe_allow_html=True)
-        
-        with tab_break:
-            render_news(get_forex_factory_news(rapid_key, 'breaking'))
-        with tab_fund:
-            render_news(get_forex_factory_news(rapid_key, 'fundamental'))
-        with tab_hot:
-            render_news(get_forex_factory_news(rapid_key, 'hottest'))
-            
+    # Display headlines
+    if news_items:
+        for news in news_items:
+            st.markdown(f"""
+            <div style="border-bottom:1px solid #333; padding-bottom:5px; margin-bottom:5px;">
+                <a class='news-link' href='{news['url']}' target='_blank'>▶ {news['title']}</a><br>
+                <span style='font-size:0.7em; color:gray;'>{news['time']}</span>
+            </div>
+            """, unsafe_allow_html=True)
     else:
-        # Standard NewsAPI Feed
-        if news_items:
-            for news in news_items:
-                st.markdown(f"""
-                <div style="border-bottom:1px solid #333; padding-bottom:10px; margin-bottom:10px;">
-                    <a class='news-link' href='{news['url']}' target='_blank'>▶ {news['title']}</a><br>
-                    <span style='font-size:0.7em; color:gray;'>{news['source']} | {news['time'][:10]}</span>
-                </div>
-                """, unsafe_allow_html=True)
-        else:
-            st.markdown("<div style='color:gray;'>NO NEWS FEED AVAILABLE</div>", unsafe_allow_html=True)
+        st.markdown("<div style='color:gray;'>NO NEWS FEED AVAILABLE</div>", unsafe_allow_html=True)
 
 # --- 4. RISK ANALYSIS & BACKTEST ---
 st.markdown("---")
@@ -1134,3 +1107,17 @@ st.markdown(f"""
     </ul>
 </div>
 """, unsafe_allow_html=True)
+
+# --- NEW: GEMINI INSIGHT BOX ---
+if gemini_key and news_items:
+    st.markdown("#### 🧠 GEMINI INSIGHT (HEDGE FUND ANALYST)")
+    with st.spinner("Analyzing news sentiment..."):
+        ai_analysis = get_llm_analysis(news_items, selected_asset, gemini_key)
+        
+    st.markdown(f"""
+    <div class='terminal-box' style='border-left: 5px solid #00e6ff;'>
+        <div style='white-space: pre-wrap; font-family: sans-serif; font-size: 0.9em; line-height: 1.5;'>{ai_analysis}</div>
+    </div>
+    """, unsafe_allow_html=True)
+elif not gemini_key:
+    st.info("ℹ️ Enter Gemini API Key in Sidebar to enable AI News Analysis .")
