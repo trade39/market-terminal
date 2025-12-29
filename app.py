@@ -15,7 +15,7 @@ import os
 import time
 
 # --- APP CONFIGURATION ---
-st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V4.6", page_icon="💹")
+st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V4.7", page_icon="💹")
 
 # --- BLOOMBERG TERMINAL STYLING (CSS) ---
 st.markdown("""
@@ -69,7 +69,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- CONSTANTS & MAPPINGS (EXPANDED LIST) ---
+# --- CONSTANTS & MAPPINGS ---
 ASSETS = {
     # --- MAJOR FOREX/INDICES ---
     "Gold (Comex)": {"ticker": "GC=F", "opt_ticker": "GLD", "news_query": "Gold Price", "cg_id": None},
@@ -163,11 +163,11 @@ def get_coingecko_stats(cg_id, api_key):
     except Exception as e:
         return None
 
-# --- LLM ENGINE (ROBUST & FREE TIER OPTIMIZED) ---
+# --- LLM ENGINE (DYNAMIC MODEL FINDER) ---
 @st.cache_data(ttl=900) # CACHE: 15 Mins
 def get_technical_narrative(ticker, price, daily_pct, regime, ml_signal, gex_data, cot_data, levels, api_key):
     """
-    Sends data to Gemini. Includes FALLBACKS for model names to prevent 404 errors.
+    Sends data to Gemini. Dynamically finds available models to prevent 404s.
     """
     if not api_key: return "AI Analyst unavailable (No Key)."
     
@@ -204,29 +204,29 @@ def get_technical_narrative(ticker, price, daily_pct, regime, ml_signal, gex_dat
     try:
         genai.configure(api_key=api_key)
         
-        # 2. Try list of valid models in order of preference (Fastest -> Standard -> Legacy)
-        # This fixes the 404 error by finding ANY model that works.
-        model_candidates = [
-            'gemini-1.5-flash',       # Preferred (Fastest)
-            'gemini-1.5-flash-latest', # Alternate alias
-            'gemini-1.5-pro',         # Standard Pro
-            'gemini-pro'              # Legacy fallback
-        ]
+        # 2. AUTO-DISCOVER VALID MODELS
+        # Instead of guessing names, we ask Google: "What models can I use?"
+        available_models = []
+        try:
+            for m in genai.list_models():
+                if 'generateContent' in m.supported_generation_methods:
+                    available_models.append(m)
+        except Exception as e:
+            return f"Error listing models: {str(e)}"
+            
+        if not available_models:
+            return "Error: No models found. Your API Key may be invalid or lacks permissions."
+            
+        # 3. PREFER FLASH -> PRO -> OTHERS
+        # Sort so that 'flash' models come first
+        available_models.sort(key=lambda x: 'flash' not in x.name) 
         
-        response = None
+        chosen_model = available_models[0]
         
-        for model_name in model_candidates:
-            try:
-                model = genai.GenerativeModel(model_name)
-                response = model.generate_content(prompt)
-                break # If successful, stop trying
-            except Exception:
-                continue # If failed, try next model
-
-        if response:
-            return response.text
-        else:
-            return "AI Analyst Error: No available Gemini models found. Check API Key."
+        # 4. EXECUTE
+        model = genai.GenerativeModel(chosen_model.name)
+        response = model.generate_content(prompt)
+        return response.text
             
     except Exception as e:
         return f"AI Analyst unavailable: {str(e)}"
@@ -828,7 +828,7 @@ with st.sidebar:
     if st.button(">> REFRESH DATA"): st.cache_data.clear()
 
 # --- MAIN DASHBOARD ---
-st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V4.6</span></h1>", unsafe_allow_html=True)
+st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V4.7</span></h1>", unsafe_allow_html=True)
 
 # Fetch Data
 daily_data = get_daily_data(asset_info['ticker'])
