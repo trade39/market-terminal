@@ -15,7 +15,7 @@ import os
 import time
 
 # --- APP CONFIGURATION ---
-st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V4.5", page_icon="💹")
+st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V4.6", page_icon="💹")
 
 # --- BLOOMBERG TERMINAL STYLING (CSS) ---
 st.markdown("""
@@ -163,21 +163,20 @@ def get_coingecko_stats(cg_id, api_key):
     except Exception as e:
         return None
 
-# --- LLM ENGINE (FREE TIER OPTIMIZED) ---
-@st.cache_data(ttl=3600) # CACHE: 1 Hour (Prevents hitting Gemini Limits)
+# --- LLM ENGINE (ROBUST & FREE TIER OPTIMIZED) ---
+@st.cache_data(ttl=900) # CACHE: 15 Mins
 def get_technical_narrative(ticker, price, daily_pct, regime, ml_signal, gex_data, cot_data, levels, api_key):
     """
-    Sends all technical data to Gemini for a cohesive synthesis.
+    Sends data to Gemini. Includes FALLBACKS for model names to prevent 404 errors.
     """
     if not api_key: return "AI Analyst unavailable (No Key)."
     
-    # Format GEX
+    # 1. Format the prompt
     gex_text = "N/A"
     if gex_data is not None:
         total_gex = gex_data['gex'].sum()
         gex_text = f"Net Gamma: ${total_gex/1_000_000:.1f}M ({'Long/Sticky' if total_gex>0 else 'Short/Volatile'})"
 
-    # Format Levels
     lvl_text = "N/A"
     if levels:
         lvl_text = f"Pivot: {levels['Pivot']:.2f}, R1: {levels['R1']:.2f}, S1: {levels['S1']:.2f}"
@@ -204,10 +203,31 @@ def get_technical_narrative(ticker, price, daily_pct, regime, ml_signal, gex_dat
 
     try:
         genai.configure(api_key=api_key)
-        # Prioritize FLASH model for speed and higher rate limits
-        model = genai.GenerativeModel('gemini-1.5-flash') 
-        response = model.generate_content(prompt)
-        return response.text
+        
+        # 2. Try list of valid models in order of preference (Fastest -> Standard -> Legacy)
+        # This fixes the 404 error by finding ANY model that works.
+        model_candidates = [
+            'gemini-1.5-flash',       # Preferred (Fastest)
+            'gemini-1.5-flash-latest', # Alternate alias
+            'gemini-1.5-pro',         # Standard Pro
+            'gemini-pro'              # Legacy fallback
+        ]
+        
+        response = None
+        
+        for model_name in model_candidates:
+            try:
+                model = genai.GenerativeModel(model_name)
+                response = model.generate_content(prompt)
+                break # If successful, stop trying
+            except Exception:
+                continue # If failed, try next model
+
+        if response:
+            return response.text
+        else:
+            return "AI Analyst Error: No available Gemini models found. Check API Key."
+            
     except Exception as e:
         return f"AI Analyst unavailable: {str(e)}"
 
@@ -808,7 +828,7 @@ with st.sidebar:
     if st.button(">> REFRESH DATA"): st.cache_data.clear()
 
 # --- MAIN DASHBOARD ---
-st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V4.5</span></h1>", unsafe_allow_html=True)
+st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V4.6</span></h1>", unsafe_allow_html=True)
 
 # Fetch Data
 daily_data = get_daily_data(asset_info['ticker'])
