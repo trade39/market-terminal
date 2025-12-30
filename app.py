@@ -15,7 +15,7 @@ import os
 import time
 
 # --- APP CONFIGURATION ---
-st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V5.7", page_icon="💹")
+st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V5.8", page_icon="💹")
 
 # --- BLOOMBERG TERMINAL STYLING (CSS) ---
 st.markdown("""
@@ -77,6 +77,7 @@ if 'gemini_calls' not in st.session_state: st.session_state['gemini_calls'] = 0
 if 'news_calls' not in st.session_state: st.session_state['news_calls'] = 0
 if 'rapid_calls' not in st.session_state: st.session_state['rapid_calls'] = 0
 if 'coingecko_calls' not in st.session_state: st.session_state['coingecko_calls'] = 0
+if 'fred_calls' not in st.session_state: st.session_state['fred_calls'] = 0
 if 'narrative_cache' not in st.session_state: st.session_state['narrative_cache'] = None
 if 'thesis_cache' not in st.session_state: st.session_state['thesis_cache'] = None
 
@@ -159,6 +160,43 @@ def safe_yf_download(tickers, period, interval, retries=3):
                 print(f"Failed to fetch {tickers}: {e}")
                 return pd.DataFrame()
             time.sleep(2 ** i) # Exponential backoff: 1s, 2s, 4s...
+    return pd.DataFrame()
+
+# --- FRED API ENGINE (ZERO DEPENDENCY) ---
+@st.cache_data(ttl=86400) # Cache for 24 hours (Macro data is slow)
+def get_fred_series(series_id, api_key, observation_start=None):
+    """
+    Fetches data from St. Louis Fed via Requests (No extra pip install needed).
+    """
+    if not api_key: return pd.DataFrame()
+    
+    st.session_state['fred_calls'] += 1
+    base_url = "https://api.stlouisfed.org/fred/series/observations"
+    
+    # Default lookback if not specified (5 years)
+    if not observation_start:
+        observation_start = (datetime.now() - timedelta(days=365*5)).strftime('%Y-%m-%d')
+
+    params = {
+        "series_id": series_id,
+        "api_key": api_key,
+        "file_type": "json",
+        "observation_start": observation_start
+    }
+    
+    try:
+        response = requests.get(base_url, params=params)
+        data = response.json()
+        
+        if "observations" in data:
+            df = pd.DataFrame(data["observations"])
+            df['date'] = pd.to_datetime(df['date'])
+            df['value'] = pd.to_numeric(df['value'], errors='coerce')
+            return df[['date', 'value']].set_index('date').dropna()
+            
+    except Exception as e:
+        return pd.DataFrame()
+    
     return pd.DataFrame()
 
 # --- COINGECKO API ENGINE ---
@@ -934,6 +972,10 @@ with st.sidebar:
         st.write(f"**CoinGecko** ({st.session_state['coingecko_calls']} / 10k Mthly)")
         st.progress(min(st.session_state['coingecko_calls'] / 10000, 1.0))
 
+        # FRED
+        st.write(f"**FRED** ({st.session_state['fred_calls']} / Calls)")
+        st.progress(0.01) # Just visual
+
     st.markdown("---")
     
     # API KEY HANDLING
@@ -941,13 +983,14 @@ with st.sidebar:
     news_key = get_api_key("news_api_key")
     gemini_key = get_api_key("gemini_api_key")
     cg_key = get_api_key("coingecko_key") 
+    fred_key = get_api_key("fred_api_key")
     
     if st.button(">> REFRESH DATA"): 
         st.cache_data.clear()
         st.rerun()
 
 # --- MAIN DASHBOARD ---
-st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V5.7</span></h1>", unsafe_allow_html=True)
+st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V5.8</span></h1>", unsafe_allow_html=True)
 
 # Fetch Data
 daily_data = get_daily_data(asset_info['ticker'])
@@ -1147,7 +1190,7 @@ with col_intra_2:
             </div>
             """, unsafe_allow_html=True)
 
-# --- 3. EVENTS & NEWS ---
+# --- 3. EVENTS & NEWS & MACRO ---
 st.markdown("---")
 col_eco, col_news = st.columns([2, 1])
 
@@ -1203,6 +1246,61 @@ with col_news:
     with tab_ff:
         render_news(news_ff)
 
+# --- NEW: FRED MACRO DASHBOARD ---
+st.markdown("---")
+st.markdown("### 🇺🇸 FED LIQUIDITY & MACRO (FRED)")
+
+if fred_key:
+    # Use tabs for different macro categories
+    macro_tab1, macro_tab2 = st.tabs(["YIELD CURVE & RATES", "INFLATION & LIQUIDITY"])
+    
+    with macro_tab1:
+        c_m1, c_m2 = st.columns(2)
+        with c_m1:
+            # Yield Curve (10Y - 2Y)
+            df_yield = get_fred_series("T10Y2Y", fred_key)
+            if not df_yield.empty:
+                curr_yield = df_yield['value'].iloc[-1]
+                yield_color = "red" if curr_yield < 0 else "green"
+                fig_yc = go.Figure()
+                fig_yc.add_trace(go.Scatter(x=df_yield.index, y=df_yield['value'], fill='tozeroy', line=dict(color=yield_color)))
+                fig_yc.add_hline(y=0, line_dash="dash", line_color="white")
+                terminal_chart_layout(fig_yc, title=f"10Y-2Y SPREAD: {curr_yield:.2f}% (Recession Indicator)", height=250)
+                st.plotly_chart(fig_yc, use_container_width=True)
+        
+        with c_m2:
+            # Fed Funds Rate
+            df_ff = get_fred_series("FEDFUNDS", fred_key)
+            if not df_ff.empty:
+                fig_ff = go.Figure()
+                fig_ff.add_trace(go.Scatter(x=df_ff.index, y=df_ff['value'], line=dict(color="#00e6ff")))
+                terminal_chart_layout(fig_ff, title=f"FED FUNDS RATE: {df_ff['value'].iloc[-1]:.2f}%", height=250)
+                st.plotly_chart(fig_ff, use_container_width=True)
+
+    with macro_tab2:
+        c_m3, c_m4 = st.columns(2)
+        with c_m3:
+             # CPI (Inflation)
+            df_cpi = get_fred_series("CPIAUCSL", fred_key)
+            if not df_cpi.empty:
+                # Calculate YoY
+                df_cpi['YoY'] = df_cpi['value'].pct_change(12) * 100
+                fig_cpi = go.Figure()
+                fig_cpi.add_trace(go.Bar(x=df_cpi.index, y=df_cpi['YoY'], marker_color='#ff9900'))
+                terminal_chart_layout(fig_cpi, title=f"CPI INFLATION (YoY): {df_cpi['YoY'].iloc[-1]:.2f}%", height=250)
+                st.plotly_chart(fig_cpi, use_container_width=True)
+        
+        with c_m4:
+            # M2 Money Supply
+            df_m2 = get_fred_series("M2SL", fred_key)
+            if not df_m2.empty:
+                fig_m2 = go.Figure()
+                fig_m2.add_trace(go.Scatter(x=df_m2.index, y=df_m2['value'], line=dict(color="#00ff00")))
+                terminal_chart_layout(fig_m2, title="M2 MONEY SUPPLY (Liquidity)", height=250)
+                st.plotly_chart(fig_m2, use_container_width=True)
+else:
+    st.info("FRED API Key not found. Add `fred_api_key` to secrets to view Fed Macro Data.")
+
 # --- 4. RISK ANALYSIS & BACKTEST ---
 st.markdown("---")
 st.markdown("### ⚡ QUANTITATIVE RISK & EXECUTION")
@@ -1252,7 +1350,7 @@ if not vwap_df.empty:
     
     # 1. Price Candles
     fig_vwap.add_trace(go.Candlestick(x=vwap_df.index, open=vwap_df['Open'], high=vwap_df['High'], 
-                                    low=vwap_df['Low'], close=vwap_df['Close'], name="Price"))
+                                      low=vwap_df['Low'], close=vwap_df['Close'], name="Price"))
     
     # 2. Session VWAP
     fig_vwap.add_trace(go.Scatter(x=vwap_df.index, y=vwap_df['VWAP'], name="Session VWAP", line=dict(color='#ff9900', width=2)))
