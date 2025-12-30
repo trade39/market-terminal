@@ -15,7 +15,7 @@ import os
 import time
 
 # --- APP CONFIGURATION ---
-st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V5.12", page_icon="💹")
+st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V5.13", page_icon="💹")
 
 # --- BLOOMBERG TERMINAL STYLING (CSS) ---
 st.markdown("""
@@ -678,6 +678,11 @@ def get_daily_data(ticker):
     except: return pd.DataFrame()
 
 @st.cache_data(ttl=300)
+def get_dxy_data():
+    try: return safe_yf_download("DX-Y.NYB", period="10y", interval="1d")
+    except: return pd.DataFrame()
+
+@st.cache_data(ttl=300)
 def get_intraday_data(ticker):
     try: return safe_yf_download(ticker, period="5d", interval="15m")
     except: return pd.DataFrame()
@@ -726,10 +731,11 @@ with st.sidebar:
         st.rerun()
 
 # --- MAIN DASHBOARD ---
-st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V5.12</span></h1>", unsafe_allow_html=True)
+st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V5.13</span></h1>", unsafe_allow_html=True)
 
 # Fetch Data
 daily_data = get_daily_data(asset_info['ticker'])
+dxy_data = get_dxy_data()
 intraday_data = get_intraday_data(asset_info['ticker'])
 eco_events = get_economic_calendar(rapid_key)
 
@@ -788,11 +794,57 @@ if not daily_data.empty:
     
     c4.metric("HIGH/LOW", f"{high.max():,.2f} / {low.min():,.2f}")
     
+    # --- CHART: DXY OVERLAY ---
     fig = go.Figure()
-    fig.add_trace(go.Candlestick(x=daily_data.index, open=daily_data['Open'], high=high, low=low, close=close, name="Price"))
+    
+    # Trace 1: Asset Candlesticks (Primary Y-Axis)
+    fig.add_trace(go.Candlestick(
+        x=daily_data.index, 
+        open=daily_data['Open'], 
+        high=high, 
+        low=low, 
+        close=close, 
+        name="Price"
+    ))
+    
+    # Trace 2: POC Line (Primary Y-Axis)
     if poc_price:
         fig.add_hline(y=poc_price, line_dash="dash", line_color="yellow", annotation_text="POC", annotation_position="bottom right")
-    terminal_chart_layout(fig, height=400)
+
+    # Trace 3: DXY Overlay (Secondary Y-Axis)
+    if not dxy_data.empty:
+        # Align DXY data to the same timeframe as the asset
+        dxy_aligned = dxy_data['Close'].reindex(daily_data.index, method='ffill')
+        
+        fig.add_trace(go.Scatter(
+            x=dxy_aligned.index, 
+            y=dxy_aligned.values, 
+            name="DXY (Dollar)", 
+            line=dict(color='orange', width=2),
+            opacity=0.7,
+            yaxis="y2" # Important: Map to secondary axis
+        ))
+
+    # Layout Updates for Dual Axis
+    fig.update_layout(
+        template="plotly_dark",
+        paper_bgcolor="#000000",
+        plot_bgcolor="#000000",
+        height=400,
+        margin=dict(l=40, r=40, t=40, b=40),
+        xaxis=dict(showgrid=True, gridcolor="#222", zerolinecolor="#222"),
+        yaxis=dict(showgrid=True, gridcolor="#222", zerolinecolor="#222", title="Asset Price"),
+        yaxis2=dict(
+            title="DXY Index",
+            overlaying="y",
+            side="right",
+            showgrid=False,
+            font=dict(color="orange")
+        ),
+        font=dict(family="Courier New", color="#e0e0e0"),
+        legend=dict(orientation="h", y=1.02, x=0, bgcolor="rgba(0,0,0,0)")
+    )
+    
     fig.update_xaxes(rangeslider_visible=False)
     st.plotly_chart(fig, use_container_width=True)
 
