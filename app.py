@@ -15,7 +15,7 @@ import os
 import time
 
 # --- APP CONFIGURATION ---
-st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V5.0", page_icon="💹")
+st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V5.1", page_icon="💹")
 
 # --- BLOOMBERG TERMINAL STYLING (CSS) ---
 st.markdown("""
@@ -523,15 +523,27 @@ def run_strategy_backtest(ticker):
 def calculate_vwap_bands(df):
     if df.empty: return df
     df = df.copy()
+    
+    # Calculate Typical Price
     df['TP'] = (df['High'] + df['Low'] + df['Close']) / 3
     df['VP'] = df['TP'] * df['Volume']
+    
+    # Group by Date to reset VWAP daily
     df['Date'] = df.index.date
+    
     df['Cum_VP'] = df.groupby('Date')['VP'].cumsum()
     df['Cum_Vol'] = df.groupby('Date')['Volume'].cumsum()
+    
     df['VWAP'] = df['Cum_VP'] / df['Cum_Vol']
-    df['Std_Dev'] = np.sqrt(df.groupby('Date').apply(lambda x: x['Volume'] * (x['TP'] - x['VWAP'])**2).reset_index(level=0, drop=True).groupby('Date').cumsum() / df['Cum_Vol'])
+    
+    # Calculate Standard Deviation Bands (Step-by-Step Vectorized to avoid KeyError)
+    df['Sq_Dist'] = df['Volume'] * (df['TP'] - df['VWAP'])**2
+    df['Cum_Sq_Dist'] = df.groupby('Date')['Sq_Dist'].cumsum()
+    df['Std_Dev'] = np.sqrt(df['Cum_Sq_Dist'] / df['Cum_Vol'])
+    
     df['Upper_Band_1'] = df['VWAP'] + df['Std_Dev']
     df['Lower_Band_1'] = df['VWAP'] - df['Std_Dev']
+    
     return df
 
 @st.cache_data(ttl=300)
@@ -611,7 +623,7 @@ with st.sidebar:
     if st.button(">> REFRESH DATA"): st.cache_data.clear()
 
 # --- MAIN DASHBOARD ---
-st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V5.0</span></h1>", unsafe_allow_html=True)
+st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V5.1</span></h1>", unsafe_allow_html=True)
 
 # Fetch Data
 daily_data = safe_yf_download(asset_info['ticker'], "10y", "1d")
