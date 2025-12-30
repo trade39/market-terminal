@@ -11,11 +11,12 @@ from datetime import datetime, timedelta
 from scipy.stats import norm
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.mixture import GaussianMixture
+from textblob import TextBlob 
 import os
 import time
 
 # --- APP CONFIGURATION ---
-st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V5.13", page_icon="💹")
+st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V5.14", page_icon="💹")
 
 # --- BLOOMBERG TERMINAL STYLING (CSS) ---
 st.markdown("""
@@ -257,6 +258,36 @@ def generate_deep_dive_thesis(ticker, price, change, regime, ml_signal, gex_data
     except Exception as e:
         return f"Thesis Generation Failed: {str(e)}"
 
+# --- NLP SENTIMENT ENGINE ---
+def calculate_news_sentiment(news_items):
+    """Calculates cumulative sentiment score from news headlines."""
+    if not news_items: return pd.DataFrame()
+    
+    scores = []
+    for news in news_items:
+        try:
+            # Simple Polarity: -1.0 (Negative) to 1.0 (Positive)
+            blob = TextBlob(f"{news['title']} {news['title']}") # Weight title double
+            score = blob.sentiment.polarity
+            
+            # Convert publishedAt to simple time order for plot
+            scores.append({
+                "title": news['title'],
+                "score": score,
+                "time": news['time']
+            })
+        except: continue
+        
+    df = pd.DataFrame(scores)
+    if df.empty: return pd.DataFrame()
+    
+    # Create cumulative sentiment "Momentum"
+    # We assume news is already sorted by date (newest first). 
+    # For cumulative chart, we need oldest first.
+    df = df.iloc[::-1].reset_index(drop=True) 
+    df['cumulative'] = df['score'].cumsum()
+    return df
+
 # --- QUANT ENGINES ---
 def calculate_hurst(series, lags=range(2, 20)):
     try:
@@ -329,7 +360,7 @@ def get_ml_prediction(ticker):
         return model, prob_up
     except: return None, 0.5
 
-# --- GAMMA EXPOSURE ---
+# --- GAMMA EXPOSURE (IV UPDATE) ---
 def calculate_black_scholes_gamma(S, K, T, r, sigma):
     if T <= 0 or sigma <= 0: return 0
     d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
@@ -338,20 +369,34 @@ def calculate_black_scholes_gamma(S, K, T, r, sigma):
 
 @st.cache_data(ttl=3600)
 def get_gex_profile(opt_ticker):
-    if opt_ticker is None: return None, None, None
+    """
+    Returns: GEX DataFrame, Expiry Date, Spot Price, AND Average ATM IV
+    """
+    if opt_ticker is None: return None, None, None, None
     try:
         tk = yf.Ticker(opt_ticker)
         try:
             hist = tk.history(period="1d")
             spot_price = hist['Close'].iloc[-1] if not hist.empty else tk.fast_info.last_price
-        except: return None, None, None
-        if spot_price is None: return None, None, None
+        except: return None, None, None, None
+        
+        if spot_price is None: return None, None, None, None
         exps = tk.options
-        if not exps: return None, None, None
+        if not exps: return None, None, None, None
+        
+        # Use next expiry for better volume
         target_exp = exps[1] if len(exps) > 1 else exps[0]
         chain = tk.option_chain(target_exp)
         calls, puts = chain.calls, chain.puts
-        if calls.empty or puts.empty: return None, None, None
+        
+        if calls.empty or puts.empty: return None, None, None, None
+        
+        # Calculate ATM IV (Strike within 5% of Spot)
+        atm_mask = (calls['strike'] > spot_price * 0.95) & (calls['strike'] < spot_price * 1.05)
+        atm_calls = calls[atm_mask]
+        avg_iv = atm_calls['impliedVolatility'].mean() * 100 if not atm_calls.empty else 0
+        
+        # GEX Calculation
         exp_date = datetime.strptime(target_exp, "%Y-%m-%d")
         days_to_exp = (exp_date - datetime.now()).days
         T = 0.001 if days_to_exp <= 0 else days_to_exp / 365.0
@@ -369,9 +414,10 @@ def get_gex_profile(opt_ticker):
             p_gamma = calculate_black_scholes_gamma(spot_price, K, T, 0.045, p_iv)
             net_gex = (c_gamma * c_oi - p_gamma * p_oi) * spot_price * 100
             gex_data.append({"strike": K, "gex": net_gex})
+            
         df = pd.DataFrame(gex_data, columns=['strike', 'gex'])
-        return df, target_exp, spot_price 
-    except: return None, None, None
+        return df, target_exp, spot_price, avg_iv
+    except: return None, None, None, None
 
 def calculate_volume_profile(df, bins=50):
     if df.empty: return None, None
@@ -731,7 +777,7 @@ with st.sidebar:
         st.rerun()
 
 # --- MAIN DASHBOARD ---
-st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V5.13.1</span></h1>", unsafe_allow_html=True)
+st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V5.14</span></h1>", unsafe_allow_html=True)
 
 # Fetch Data
 daily_data = get_daily_data(asset_info['ticker'])
@@ -746,13 +792,14 @@ combined_news_for_llm = news_general[:5] + news_ff[:5]
 
 # Engines
 _, ml_prob = get_ml_prediction(asset_info['ticker'])
-gex_df, gex_date, gex_spot = get_gex_profile(asset_info['opt_ticker'])
+gex_df, gex_date, gex_spot, current_iv = get_gex_profile(asset_info['opt_ticker'])
 vol_profile, poc_price = calculate_volume_profile(intraday_data)
 hurst = calculate_hurst(daily_data['Close'].values) if not daily_data.empty else 0.5
 regime_data = get_market_regime(asset_info['ticker'])
 cot_data = get_cot_data(selected_asset)
 tech_radar = calculate_technical_radar(daily_data)
 correlations = get_correlations(asset_info['ticker'], fred_key)
+news_sentiment_df = calculate_news_sentiment(combined_news_for_llm)
 
 # --- 1. OVERVIEW ---
 if not daily_data.empty:
@@ -797,7 +844,7 @@ if not daily_data.empty:
     # --- CHART: DXY OVERLAY ---
     fig = go.Figure()
     
-    # Trace 1: Asset Candlesticks (Primary Y-Axis)
+    # Trace 1: Asset Candlesticks
     fig.add_trace(go.Candlestick(
         x=daily_data.index, 
         open=daily_data['Open'], 
@@ -807,22 +854,19 @@ if not daily_data.empty:
         name="Price"
     ))
     
-    # Trace 2: POC Line (Primary Y-Axis)
     if poc_price:
         fig.add_hline(y=poc_price, line_dash="dash", line_color="yellow", annotation_text="POC", annotation_position="bottom right")
 
-    # Trace 3: DXY Overlay (Secondary Y-Axis)
+    # Trace 3: DXY Overlay
     if not dxy_data.empty:
-        # Align DXY data to the same timeframe as the asset
         dxy_aligned = dxy_data['Close'].reindex(daily_data.index, method='ffill')
-        
         fig.add_trace(go.Scatter(
             x=dxy_aligned.index, 
             y=dxy_aligned.values, 
             name="DXY (Dollar)", 
             line=dict(color='orange', width=2),
             opacity=0.7,
-            yaxis="y2" # Important: Map to secondary axis
+            yaxis="y2"
         ))
 
     # Layout Updates for Dual Axis
@@ -839,7 +883,6 @@ if not daily_data.empty:
             overlaying="y",
             side="right",
             showgrid=False,
-            # FIXED: 'font' is invalid in yaxis dict. Use title_font and tickfont instead.
             title_font=dict(color="orange"),
             tickfont=dict(color="orange")
         ),
@@ -983,7 +1026,30 @@ with col_eco:
             st.dataframe(df_cal.style.map(color_bias, subset=['BIAS']), use_container_width=True, hide_index=True)
     else: st.info("NO HIGH IMPACT USD EVENTS SCHEDULED.")
 with col_news:
-    st.markdown(f"### 📰 {asset_info.get('news_query', 'LATEST')} WIRE")
+    # --- NEW: SENTIMENT CHART ---
+    st.markdown(f"### 📰 {asset_info.get('news_query', 'LATEST')} WIRE & SENTIMENT")
+    
+    # Render Sentiment Chart FIRST if available
+    if not news_sentiment_df.empty:
+         fig_sent = go.Figure()
+         fig_sent.add_trace(go.Scatter(
+             x=news_sentiment_df.index, 
+             y=news_sentiment_df['cumulative'],
+             mode='lines+markers',
+             line=dict(color='#00e6ff', width=2, shape='spline'),
+             name="Sentiment"
+         ))
+         fig_sent.update_layout(
+             title="NLP SENTIMENT VELOCITY (Current Batch)",
+             height=150,
+             margin=dict(l=10, r=10, t=30, b=10),
+             paper_bgcolor="#111", plot_bgcolor="#111",
+             font=dict(size=10, color="white"),
+             xaxis=dict(showgrid=False, visible=False),
+             yaxis=dict(showgrid=True, gridcolor="#333")
+         )
+         st.plotly_chart(fig_sent, use_container_width=True)
+    
     tab_gen, tab_ff = st.tabs(["📰 GENERAL", "⚡ FOREX FACTORY"])
     def render_news(items):
         if items:
@@ -1145,11 +1211,12 @@ if not vwap_df.empty:
     terminal_chart_layout(fig_vwap, height=500)
     st.plotly_chart(fig_vwap, use_container_width=True)
 
-# --- 6. GEX ---
+# --- 6. GEX & VOLATILITY ---
 st.markdown("---")
-st.markdown("### 🏦 INSTITUTIONAL GAMMA EXPOSURE (GEX)")
+st.markdown("### 🏦 INSTITUTIONAL GEX & VOLATILITY")
 if gex_df is not None and gex_spot is not None:
-    g1, g2 = st.columns([3, 1])
+    g1, g2, g3 = st.columns([2, 1, 1])
+    
     with g1:
         center_strike = gex_spot 
         gex_zoom = gex_df[(gex_df['strike'] > center_strike * 0.9) & (gex_df['strike'] < center_strike * 1.1)]
@@ -1159,6 +1226,7 @@ if gex_df is not None and gex_spot is not None:
         fig_gex.add_vline(x=center_strike, line_dash="dot", line_color="white", annotation_text="ETF SPOT")
         terminal_chart_layout(fig_gex, title=f"NET GAMMA PROFILE (EXP: {gex_date})")
         st.plotly_chart(fig_gex, use_container_width=True)
+        
     with g2:
         total_gex = gex_df['gex'].sum() / 1_000_000
         sentiment = "LOW VOL (Sticky)" if total_gex > 0 else "HIGH VOL (Slippery)"
@@ -1170,6 +1238,32 @@ if gex_df is not None and gex_spot is not None:
             <div style='margin-top:10px;'><span class='{sent_color}'>{sentiment}</span></div>
         </div>
         """, unsafe_allow_html=True)
+    
+    # --- NEW: VOLATILITY DASHBOARD ---
+    with g3:
+        # Calculate HV (20D Annualized)
+        if not daily_data.empty:
+            hv_current = daily_data['Close'].pct_change().rolling(20).std().iloc[-1] * np.sqrt(252) * 100
+        else:
+            hv_current = 0
+            
+        iv_display = current_iv if current_iv else 0
+        vol_premium = iv_display - hv_current
+        prem_color = "#ff3333" if vol_premium > 5 else "#00ff00" if vol_premium < 0 else "white"
+        
+        st.markdown(f"""
+        <div class='terminal-box'>
+            <div style='color:#aaa; font-size:0.8em;'>IMPLIED VOL (IV)</div>
+            <div style='font-size:1.2em; color:#00e6ff;'>{iv_display:.1f}%</div>
+            <hr style='margin:5px 0; border-color:#333;'>
+            <div style='color:#aaa; font-size:0.8em;'>HISTORICAL VOL (HV)</div>
+            <div style='font-size:1.2em; color:#e0e0e0;'>{hv_current:.1f}%</div>
+            <hr style='margin:5px 0; border-color:#333;'>
+            <div style='color:#aaa; font-size:0.8em;'>VOL PREMIUM (IV-HV)</div>
+            <div style='font-size:1.2em; color:{prem_color};'>{vol_premium:.1f}%</div>
+        </div>
+        """, unsafe_allow_html=True)
+
 else: st.warning("GEX Data Unavailable for this asset.")
 
 # --- 7. MONTE CARLO & ADVANCED SEASONALITY ---
