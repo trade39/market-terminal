@@ -31,9 +31,10 @@ except ImportError:
     HAS_COT_LIB = False
 
 # --- APP CONFIGURATION ---
-st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V5.17", page_icon="⚡")
+st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V5.19", page_icon="⚡")
 
 # --- BLOOMBERG TERMINAL STYLING (CSS) ---
+# Restored full readable CSS
 st.markdown("""
 <style>
     /* Main Background - True Black */
@@ -116,7 +117,7 @@ ASSETS = {
     "Polygon": {"ticker": "MATIC-USD", "opt_ticker": None, "news_query": "Polygon MATIC", "cg_id": "matic-network"},
 }
 
-# ENHANCED COT MAPPING (Matched to new logic)
+# Restored Readable Dictionary
 COT_MAPPING = {
     "Gold (Comex)": {
         "keywords": ["GOLD", "COMMODITY EXCHANGE"], 
@@ -181,6 +182,70 @@ def safe_yf_download(tickers, period, interval, retries=3):
             if i == retries - 1: return pd.DataFrame()
             time.sleep(2 ** i)
     return pd.DataFrame()
+
+# -----------------------------------------------------------------------------
+# MOCK DATA GENERATORS (Quota Saver)
+# -----------------------------------------------------------------------------
+def get_mock_ultimate_calendar():
+    return [
+        {"time": "08:30 AM", "country": "US", "title": "[DEMO] Core PPI m/m", "actual": "0.3%", "previous": "0.2%", "forecast": "0.2%", "impact": "High"},
+        {"time": "08:30 AM", "country": "US", "title": "[DEMO] PPI m/m", "actual": "0.1%", "previous": "-0.1%", "forecast": "0.1%", "impact": "High"},
+        {"time": "10:00 AM", "country": "US", "title": "[DEMO] Prelim UoM Consumer Sentiment", "actual": "69.5", "previous": "67.4", "forecast": "69.0", "impact": "Medium"},
+    ]
+
+def get_mock_forex_factory():
+    return [
+        {"Currency": "USD", "Impact": "High", "Event": "[DEMO] Unemployment Claims", "Actual": "210K", "Forecast": "215K", "Previous": "208K"},
+        {"Currency": "USD", "Impact": "High", "Event": "[DEMO] Philly Fed Mfg Index", "Actual": "15.5", "Forecast": "8.0", "Previous": "12.2"},
+        {"Currency": "USD", "Impact": "Medium", "Event": "[DEMO] Natural Gas Storage", "Actual": "85B", "Forecast": "82B", "Previous": "79B"},
+    ]
+
+def get_mock_news():
+    return [
+        {"Title": "[DEMO] Dollar surges as inflation fears return", "Link": "#", "Date": "2 hours ago"},
+        {"Title": "[DEMO] Fed Chair signals rate cut delay", "Link": "#", "Date": "4 hours ago"},
+        {"Title": "[DEMO] Oil prices drop amid supply concerns", "Link": "#", "Date": "5 hours ago"},
+    ]
+
+# -----------------------------------------------------------------------------
+# SMART API HANDLING (V5.18 Feature)
+# -----------------------------------------------------------------------------
+def make_api_request(url, api_key, params=None, headers=None):
+    if not api_key: return {"error": "NO_KEY"}
+    if not headers: headers = {}
+    
+    try:
+        response = requests.get(url, headers=headers, params=params)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.HTTPError as err:
+        if err.response.status_code == 429: return {"error": "429_LIMIT"}
+        return {"error": str(err)}
+    except Exception as e:
+        return {"error": str(e)}
+
+@st.cache_data(ttl=3600)
+def fetch_ultimate_calendar_live(api_key, target_date, countries):
+    if not api_key: return {"error": "NO_KEY"}
+    st.session_state['rapid_calls'] += 1
+    url = "https://ultimate-economic-calendar.p.rapidapi.com/economic-events/tradingview"
+    date_str = target_date.strftime("%Y-%m-%d")
+    country_str = ",".join(countries)
+    querystring = {"from": date_str, "to": date_str, "countries": country_str}
+    headers = {"x-rapidapi-key": api_key, "x-rapidapi-host": "ultimate-economic-calendar.p.rapidapi.com"}
+    return make_api_request(url, api_key, querystring, headers)
+
+@st.cache_data(ttl=3600)
+def fetch_forex_factory_live(api_key, date_obj):
+    if not api_key: return {"error": "NO_KEY"}
+    st.session_state['rapid_calls'] += 1
+    url = "https://forex-factory-scraper1.p.rapidapi.com/get_real_time_calendar_details"
+    querystring = {
+        "calendar": "Forex", "year": str(date_obj.year), "month": str(date_obj.month), "day": str(date_obj.day),
+        "currency": "USD", "event_name": "ALL", "timezone": "GMT-05:00 Eastern Time (US & Canada)", "time_format": "12h"
+    }
+    headers = {"x-rapidapi-key": api_key, "x-rapidapi-host": "forex-factory-scraper1.p.rapidapi.com"}
+    return make_api_request(url, api_key, querystring, headers)
 
 # --- FRED API ENGINE ---
 @st.cache_data(ttl=86400)
@@ -266,6 +331,7 @@ def get_technical_narrative(ticker, price, daily_pct, regime, ml_signal, gex_dat
         if "429" in str(e): return "⚠️ API LIMIT REACHED."
         return f"AI Analyst unavailable: {str(e)}"
 
+# Restored Full Deep Dive Prompt
 def generate_deep_dive_thesis(ticker, price, change, regime, ml_signal, gex_data, cot_data, levels, news_summary, macro_data, api_key):
     if not api_key: return "API Key Missing."
     st.session_state['gemini_calls'] += 1
@@ -298,7 +364,7 @@ def generate_deep_dive_thesis(ticker, price, change, regime, ml_signal, gex_data
     except Exception as e:
         return f"Thesis Generation Failed: {str(e)}"
 
-# --- NLP SENTIMENT ENGINE (SAFE) ---
+# --- NLP SENTIMENT ENGINE ---
 def calculate_news_sentiment(news_items):
     """Calculates cumulative sentiment score from news headlines."""
     if not HAS_NLP or not news_items: return pd.DataFrame()
@@ -539,198 +605,7 @@ def calculate_technical_radar(df):
     else: signals['Trend'] = {"val": "Chop", "bias": "WEAK/MIXED", "col": "neutral"}
     return signals
 
-# --- NEWS & ECO ---
-def parse_eco_value(val_str):
-    if not isinstance(val_str, str) or val_str == '': return None
-    clean = val_str.replace('%', '').replace(',', '')
-    multiplier = 1.0
-    if 'K' in clean.upper(): multiplier = 1000.0; clean = clean.upper().replace('K', '')
-    elif 'M' in clean.upper(): multiplier = 1000000.0; clean = clean.upper().replace('M', '')
-    elif 'B' in clean.upper(): multiplier = 1000000000.0; clean = clean.upper().replace('B', '')
-    try: return float(clean) * multiplier
-    except: return None
-
-def analyze_eco_context(actual_str, forecast_str, previous_str):
-    is_happened = actual_str is not None and actual_str != ""
-    val_actual = parse_eco_value(actual_str)
-    val_forecast = parse_eco_value(forecast_str)
-    val_prev = parse_eco_value(previous_str)
-    context_str = ""
-    bias = "Neutral"
-    if is_happened:
-        if val_actual is not None and val_forecast is not None:
-            context_str = f"Actual ({actual_str}) vs Forecast ({forecast_str})"
-            delta = val_actual - val_forecast
-            pct_dev = abs(delta / val_forecast) if val_forecast != 0 else 1.0
-            if pct_dev < 0.02: bias = "Mean Reverting"
-            elif delta > 0: bias = "Bullish"
-            else: bias = "Bearish"
-        else: context_str = f"Actual: {actual_str}"
-    else:
-        if val_forecast is not None and val_prev is not None:
-            context_str = f"Forecast ({forecast_str}) vs Prev ({previous_str})"
-            delta = val_forecast - val_prev
-            pct_dev = abs(delta / val_prev) if val_prev != 0 else 1.0
-            if pct_dev < 0.02: bias = "Mean Reverting"
-            elif delta > 0: bias = "Bullish Exp."
-            else: bias = "Bearish Exp."
-        else: context_str = "Waiting for Data..."
-    return context_str, bias
-
-@st.cache_data(ttl=14400) 
-def get_financial_news_general(api_key, query="Finance"):
-    if not api_key: return []
-    st.session_state['news_calls'] += 1
-    try:
-        newsapi = NewsApiClient(api_key=api_key)
-        all_articles = newsapi.get_everything(q=query, language='en', sort_by='publishedAt')
-        articles = []
-        if all_articles['status'] == 'ok':
-            for art in all_articles['articles'][:6]:
-                articles.append({"title": art['title'], "source": art['source']['name'], "url": art['url'], "time": art['publishedAt']})
-        return articles
-    except: return []
-
-@st.cache_data(ttl=14400)
-def get_forex_factory_news(api_key, news_type='breaking'):
-    if not api_key: return []
-    st.session_state['rapid_calls'] += 1
-    base_url = "https://forex-factory-scraper1.p.rapidapi.com/"
-    endpoints = {'breaking': "latest_breaking_news", 'fundamental': "latest_fundamental_analysis_news"}
-    url = base_url + endpoints.get(news_type, "latest_breaking_news")
-    headers = {"x-rapidapi-key": api_key, "x-rapidapi-host": "forex-factory-scraper1.p.rapidapi.com"}
-    try:
-        response = requests.get(url, headers=headers)
-        data = response.json()
-        normalized_news = []
-        if isinstance(data, list):
-            for item in data[:6]:
-                normalized_news.append({
-                    "title": item.get('title', 'No Title'),
-                    "url": item.get('link', item.get('url', '#')),
-                    "source": "ForexFactory",
-                    "time": item.get('date', item.get('time', 'Recent'))
-                })
-        return normalized_news
-    except: return []
-
-@st.cache_data(ttl=21600)
-def get_economic_calendar(api_key):
-    if not api_key: return None
-    st.session_state['rapid_calls'] += 1
-    try:
-        url = "https://forex-factory-scraper1.p.rapidapi.com/get_real_time_calendar_details"
-        now = datetime.now()
-        querystring = {"calendar": "Forex", "year": str(now.year), "month": str(now.month), "day": str(now.day), "currency": "ALL", "event_name": "ALL", "timezone": "GMT-04:00 Eastern Time (US & Canada)", "time_format": "12h"}
-        headers = {"x-rapidapi-host": "forex-factory-scraper1.p.rapidapi.com", "x-rapidapi-key": api_key}
-        response = requests.get(url, headers=headers, params=querystring)
-        data = response.json()
-        raw_events = data if isinstance(data, list) else data.get('data', [])
-        filtered_events = []
-        for e in raw_events:
-            if e.get('currency') == 'USD' and (e.get('impact') == 'High' or e.get('impact') == 'Medium'):
-                filtered_events.append(e)
-        if filtered_events: return filtered_events
-    except: pass 
-    return []
-
-# --- TRADING LOGIC ---
-@st.cache_data(ttl=300)
-def run_strategy_backtest(ticker):
-    try:
-        df = safe_yf_download(ticker, period="2y", interval="1d")
-        if df.empty: return None
-        df['Returns'] = df['Close'].pct_change()
-        df['Range'] = df['High'] - df['Low']
-        df['TR'] = pd.concat([df['Range'], (df['High'] - df['Close'].shift(1)).abs(), (df['Low'] - df['Close'].shift(1)).abs()], axis=1).max(axis=1)
-        df['Log_TR'] = np.log(df['TR'] / df['Close'])
-        df['Vol_Forecast'] = df['Log_TR'].ewm(span=10).mean()
-        df['Vol_Baseline'] = df['Log_TR'].rolling(20).mean()
-        df['SMA_50'] = df['Close'].rolling(50).mean()
-        df['Signal'] = np.where((df['Vol_Forecast'] > df['Vol_Baseline']) & (df['Close'] > df['SMA_50']), 1, 0)
-        df['Strategy_Returns'] = df['Signal'].shift(1) * df['Returns']
-        df['Cum_BnH'] = (1 + df['Returns']).cumprod()
-        df['Cum_Strat'] = (1 + df['Strategy_Returns']).cumprod()
-        total_return = df['Cum_Strat'].iloc[-1] - 1
-        sharpe = (df['Strategy_Returns'].mean() / df['Strategy_Returns'].std()) * np.sqrt(252) if df['Strategy_Returns'].std() != 0 else 0
-        current_signal = "LONG" if df['Signal'].iloc[-1] == 1 else "CASH/NEUTRAL"
-        return {"df": df, "signal": current_signal, "return": total_return, "sharpe": sharpe, "equity_curve": df['Cum_Strat']}
-    except: return None
-
-def calculate_vwap_bands(df):
-    if df.empty: return df
-    df = df.copy()
-    df['TP'] = (df['High'] + df['Low'] + df['Close']) / 3
-    df['VP'] = df['TP'] * df['Volume']
-    df['Date'] = df.index.date
-    df['Cum_VP'] = df.groupby('Date')['VP'].cumsum()
-    df['Cum_Vol'] = df.groupby('Date')['Volume'].cumsum()
-    df['VWAP'] = df['Cum_VP'] / df['Cum_Vol']
-    df['Sq_Dist'] = df['Volume'] * (df['TP'] - df['VWAP'])**2
-    df['Cum_Sq_Dist'] = df.groupby('Date')['Sq_Dist'].cumsum()
-    df['Std_Dev'] = np.sqrt(df['Cum_Sq_Dist'] / df['Cum_Vol'])
-    df['Upper_Band_1'] = df['VWAP'] + df['Std_Dev']
-    df['Lower_Band_1'] = df['VWAP'] - df['Std_Dev']
-    return df
-
-@st.cache_data(ttl=300) 
-def get_relative_strength(asset_ticker, benchmark_ticker="SPY"):
-    try:
-        asset = safe_yf_download(asset_ticker, period="5d", interval="15m")
-        bench = safe_yf_download(benchmark_ticker, period="5d", interval="15m")
-        if asset.empty or bench.empty: return pd.DataFrame()
-        df = pd.DataFrame(index=asset.index)
-        df['Asset_Close'] = asset['Close']
-        df['Bench_Close'] = bench['Close']
-        df = df.dropna()
-        current_date = df.index[-1].date()
-        session_data = df[df.index.date == current_date].copy()
-        if session_data.empty: return pd.DataFrame()
-        session_data['Asset_Pct'] = (session_data['Asset_Close'] / session_data['Asset_Close'].iloc[0]) - 1
-        session_data['Bench_Pct'] = (session_data['Bench_Close'] / session_data['Bench_Close'].iloc[0]) - 1
-        session_data['RS_Score'] = session_data['Asset_Pct'] - session_data['Bench_Pct']
-        return session_data
-    except: return pd.DataFrame()
-
-def get_key_levels(daily_df):
-    if daily_df.empty: return {}
-    try: last_complete_day = daily_df.iloc[-2]
-    except: return {}
-    high, low, close = last_complete_day['High'], last_complete_day['Low'], last_complete_day['Close']
-    pivot = (high + low + close) / 3
-    return {
-        "PDH": high, "PDL": low, "PDC": close, "Pivot": pivot, 
-        "R1": (2 * pivot) - low, "S1": (2 * pivot) - high
-    }
-
-@st.cache_data(ttl=3600)
-def get_correlations(base_ticker, api_key):
-    try:
-        tickers = {"Base": base_ticker, "VIX": "^VIX", "10Y Yield": "^TNX", "Gold": "GC=F"}
-        yf_data = safe_yf_download(list(tickers.values()), period="6mo", interval="1d")
-        fred_data = get_fred_series("DTWEXAFEGS", api_key) 
-        if yf_data.empty: return pd.Series()
-        
-        if isinstance(yf_data.columns, pd.MultiIndex): yf_df = yf_data['Close'].copy()
-        elif 'Close' in yf_data.columns: yf_df = yf_data['Close'].copy()
-        else: yf_df = yf_data.copy()
-            
-        if isinstance(yf_df, pd.Series): yf_df = yf_df.to_frame(name=list(tickers.keys())[0])
-        found_cols = {c: k for k, v in tickers.items() if v in yf_df.columns}
-        yf_df.rename(columns=found_cols, inplace=True)
-        
-        combined = yf_df
-        if not fred_data.empty:
-            fred_data = fred_data.rename(columns={'value': 'Dollar'})
-            if yf_df.index.tz is not None: yf_df.index = yf_df.index.tz_localize(None)
-            combined = pd.concat([yf_df, fred_data], axis=1).dropna()
-            
-        if combined.empty or 'Base' not in combined.columns: return pd.Series()
-        corrs = combined.pct_change().rolling(20).corr(combined['Base'].pct_change()).iloc[-1]
-        return corrs.drop('Base') 
-    except: return pd.Series()
-
-# --- NEW: COT QUANT ENGINE ---
+# --- COT DATA ENGINE (Robust) ---
 def clean_headers(df):
     if isinstance(df.columns[0], int):
         for i in range(20):
@@ -793,7 +668,7 @@ def fetch_cot_history(asset_name, start_year=2024):
         # Fallback Direct
         if df_year is None or df_year.empty:
             try:
-                url = f"https://www.cftc.gov/files/dea/history/deahistfo{y}.zip" # Default to Future Only
+                url = f"https://www.cftc.gov/files/dea/history/deahistfo{y}.zip" 
                 r = requests.get(url)
                 if r.status_code == 200:
                     with zipfile.ZipFile(io.BytesIO(r.content)) as z:
@@ -809,7 +684,6 @@ def fetch_cot_history(asset_name, start_year=2024):
             
     if master_df.empty: return None
     
-    # Filter
     if 'market' not in master_df.columns: return None
     mask = master_df['market'].astype(str).apply(lambda x: all(k.lower() in x.lower() for k in keywords))
     df_asset = master_df[mask].copy()
@@ -898,6 +772,16 @@ with st.sidebar:
             st.info("Using Direct COT Fetch (No Lib)")
             
     st.markdown("---")
+    
+    # --- QUOTA SAVER TOGGLE (V5.18 Feature) ---
+    with st.expander("🛡️ API PROTECTION", expanded=True):
+        use_demo = st.checkbox("Use DEMO Data", value=True, help="Uncheck to use real API calls")
+        if use_demo:
+            st.success("🟢 MOCK MODE ACTIVE")
+        else:
+            st.error("🔴 LIVE API MODE")
+            
+    st.markdown("---")
     rapid_key = get_api_key("rapidapi_key")
     news_key = get_api_key("news_api_key")
     gemini_key = get_api_key("gemini_api_key")
@@ -909,7 +793,7 @@ with st.sidebar:
         st.rerun()
 
 # --- MAIN DASHBOARD ---
-st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V5.17</span></h1>", unsafe_allow_html=True)
+st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V5.19</span></h1>", unsafe_allow_html=True)
 
 # Fetch Data
 daily_data = get_daily_data(asset_info['ticker'])
@@ -917,21 +801,15 @@ dxy_data = get_dxy_data()
 intraday_data = get_intraday_data(asset_info['ticker'])
 eco_events = get_economic_calendar(rapid_key)
 
-# Fetch News from BOTH sources
-news_general = get_financial_news_general(news_key, query=asset_info.get('news_query', 'Finance'))
-news_ff = get_forex_factory_news(rapid_key, 'breaking')
-combined_news_for_llm = news_general[:5] + news_ff[:5]
-
 # Engines
 _, ml_prob = get_ml_prediction(asset_info['ticker'])
 gex_df, gex_date, gex_spot, current_iv = get_gex_profile(asset_info['opt_ticker'])
 vol_profile, poc_price = calculate_volume_profile(intraday_data)
 hurst = calculate_hurst(daily_data['Close'].values) if not daily_data.empty else 0.5
 regime_data = get_market_regime(asset_info['ticker'])
-# OLD COT FETCH REMOVED -> REPLACED BY SECTION 8 LOGIC
+cot_data = get_cot_data(selected_asset)
 tech_radar = calculate_technical_radar(daily_data)
 correlations = get_correlations(asset_info['ticker'], fred_key)
-news_sentiment_df = calculate_news_sentiment(combined_news_for_llm)
 
 # --- 1. OVERVIEW ---
 if not daily_data.empty:
@@ -1137,67 +1015,77 @@ with col_intra_2:
             </div>
             """, unsafe_allow_html=True)
 
-# --- 3. EVENTS & NEWS & MACRO ---
+# --- 3. EVENTS & NEWS & MACRO (V5.19 Enhanced) ---
 st.markdown("---")
 col_eco, col_news = st.columns([2, 1])
+
+# --- UPDATED ECONOMIC EVENTS ---
 with col_eco:
     st.markdown("### 📅 ECONOMIC EVENTS (USD)")
-    if eco_events:
-        cal_data = []
-        for event in eco_events:
-            context, bias = analyze_eco_context(event.get('actual', ''), event.get('forecast', ''), event.get('previous', ''))
-            cal_data.append({"TIME": event.get('time', 'N/A'), "EVENT": event.get('event_name', 'Unknown'), "DATA CONTEXT": context, "BIAS": bias})
-        df_cal = pd.DataFrame(cal_data)
-        def color_bias(val):
-            color = 'white'
-            if 'Bullish' in val: color = '#00ff00' 
-            elif 'Bearish' in val: color = '#ff3333'
-            elif 'Mean' in val: color = '#cccc00'
-            return f'color: {color}'
-        if not df_cal.empty: 
-            st.dataframe(df_cal.style.map(color_bias, subset=['BIAS']), use_container_width=True, hide_index=True)
-    else: st.info("NO HIGH IMPACT USD EVENTS SCHEDULED.")
-with col_news:
-    # --- NEW: SENTIMENT CHART ---
-    st.markdown(f"### 📰 {asset_info.get('news_query', 'LATEST')} WIRE & SENTIMENT")
     
-    if HAS_NLP and not news_sentiment_df.empty:
-         fig_sent = go.Figure()
-         fig_sent.add_trace(go.Scatter(
-             x=news_sentiment_df.index, 
-             y=news_sentiment_df['cumulative'],
-             mode='lines+markers',
-             line=dict(color='#00e6ff', width=2, shape='spline'),
-             name="Sentiment"
-         ))
-         fig_sent.update_layout(
-             title="NLP SENTIMENT VELOCITY (Current Batch)",
-             height=150,
-             margin=dict(l=10, r=10, t=30, b=10),
-             paper_bgcolor="#111", plot_bgcolor="#111",
-             font=dict(size=10, color="white"),
-             xaxis=dict(showgrid=False, visible=False),
-             yaxis=dict(showgrid=True, gridcolor="#333")
-         )
-         st.plotly_chart(fig_sent, use_container_width=True)
-    elif not HAS_NLP:
-        st.warning("Install `textblob` to enable Sentiment Analysis.")
+    if use_demo:
+        data_ult = get_mock_ultimate_calendar()
+        data_ff = get_mock_forex_factory()
+        st.caption("Using Mock Data (Quota Saved)")
+    else:
+        with st.spinner("Fetching Live Calendar..."):
+            data_ult = fetch_ultimate_calendar_live(rapid_key, datetime.now(), ["US"])
+            data_ff = fetch_forex_factory_live(rapid_key, datetime.now())
+            
+    # Tabulate
+    tab_tv, tab_ff = st.tabs(["🌐 TradingView", "🏭 Forex Factory"])
     
-    tab_gen, tab_ff = st.tabs(["📰 GENERAL", "⚡ FOREX FACTORY"])
-    def render_news(items):
-        if items:
-            for news in items:
-                st.markdown(f"""
-                <div style="border-bottom:1px solid #333; padding-bottom:5px; margin-bottom:5px;">
-                    <a class='news-link' href='{news['url']}' target='_blank'>▶ {news['title']}</a><br>
-                    <span style='font-size:0.7em; color:gray;'>{news['time']} | {news['source']}</span>
-                </div>
-                """, unsafe_allow_html=True)
-        else: st.markdown("<div style='color:gray;'>No data.</div>", unsafe_allow_html=True)
-    with tab_gen: render_news(news_general)
-    with tab_ff: render_news(news_ff)
+    with tab_tv:
+        if isinstance(data_ult, list) and data_ult:
+            df_ult = pd.DataFrame(data_ult)
+            if 'impact' in df_ult.columns:
+                df_ult = df_ult[df_ult['impact'].astype(str).str.contains("High", case=False, na=False)]
+            if not df_ult.empty:
+                cols = [c for c in ["time", "title", "actual", "previous", "forecast", "impact"] if c in df_ult.columns]
+                st.dataframe(df_ult[cols], use_container_width=True, hide_index=True)
+            else: st.info("No High Impact events found.")
+        elif isinstance(data_ult, dict) and "error" in data_ult:
+            st.error(f"API Error: {data_ult['error']}")
+        else: st.info("No data.")
+        
+    with tab_ff:
+        if isinstance(data_ff, list) and data_ff:
+            df_ff = pd.DataFrame(data_ff)
+            if 'Currency' in df_ff.columns and 'Impact' in df_ff.columns:
+                df_ff = df_ff[(df_ff['Currency'] == 'USD') & (df_ff['Impact'].str.contains("High", case=False, na=False))]
+            if not df_ff.empty:
+                st.dataframe(df_ff, use_container_width=True, hide_index=True)
+            else: st.info("No High Impact USD events.")
+        elif isinstance(data_ff, dict) and "error" in data_ff:
+            st.error(f"API Error: {data_ff['error']}")
+        else: st.info("No data.")
 
-# --- NEW: FRED MACRO DASHBOARD ---
+# --- UPDATED NEWS ---
+with col_news:
+    st.markdown(f"### 📰 {asset_info.get('news_query', 'LATEST')} WIRE")
+    
+    if use_demo:
+        news_data = get_mock_news()
+        df_news = pd.DataFrame(news_data)
+        st.caption("Mock News")
+    else:
+        # Use existing NewsAPI or fallback to RapidAPI
+        news_data = get_financial_news_general(news_key, query=asset_info.get('news_query', 'Finance'))
+        df_news = pd.DataFrame(news_data)
+    
+    if not df_news.empty:
+        st.dataframe(df_news, use_container_width=True, hide_index=True)
+        
+        # NLP Analysis
+        if HAS_NLP:
+            sentiment_df = calculate_news_sentiment(news_data if use_demo else [{'title': r['title'], 'time': r.get('publishedAt', '')} for r in news_data])
+            if not sentiment_df.empty:
+                fig_sent = go.Figure()
+                fig_sent.add_trace(go.Scatter(x=sentiment_df.index, y=sentiment_df['cumulative'], mode='lines', line=dict(color='#00e6ff', width=2), fill='tozeroy'))
+                fig_sent.update_layout(title="NEWS SENTIMENT MOMENTUM", height=150, paper_bgcolor="#111", plot_bgcolor="#111", margin=dict(l=10, r=10, t=30, b=10), xaxis=dict(visible=False), yaxis=dict(showgrid=True, gridcolor="#333"))
+                st.plotly_chart(fig_sent, use_container_width=True)
+
+# --- 4. RISK & MACRO ---
 st.markdown("---")
 st.markdown("### 🇺🇸 FED LIQUIDITY & MACRO (FRED)")
 macro_context_data = {} 
@@ -1437,120 +1325,68 @@ if pred_dates is not None and pred_paths is not None:
     terminal_chart_layout(fig_pred, title="MONTE CARLO PROJECTION (126 Days)", height=400)
     st.plotly_chart(fig_pred, use_container_width=True)
 
-# --- 8. COT QUANT TERMINAL (V5.17 UPGRADE) ---
+# --- 8. COT QUANT TERMINAL ---
 st.markdown("---")
 st.markdown("### 🏛️ COT QUANT TERMINAL")
-
-# 1. Fetch Historical Data
 with st.spinner("Analyzing CFTC Data..."):
     cot_history = fetch_cot_history(selected_asset, start_year=2024)
 
 if cot_history is not None and not cot_history.empty:
-    
-    # 2. Process Data for Metrics
     cot_config = COT_MAPPING[selected_asset]
     spec_label, hedge_label = cot_config['labels']
-    
     if all(c in cot_history.columns for c in ['spec_long', 'spec_short', 'hedge_long', 'hedge_short']):
-        
-        # Calculations
         cot_history['Net Speculator'] = cot_history['spec_long'] - cot_history['spec_short']
         cot_history['Net Hedger'] = cot_history['hedge_long'] - cot_history['hedge_short']
         cot_history['Spec Z-Score'] = calculate_z_score(cot_history['Net Speculator'])
         
         latest_cot = cot_history.iloc[-1]
-        prev_cot = cot_history.iloc[-2] if len(cot_history) > 1 else latest_cot
         
-        # 3. METRICS ROW
         c_cot1, c_cot2, c_cot3, c_cot4 = st.columns(4)
+        c_cot1.metric(f"{spec_label} (Net)", f"{int(latest_cot['Net Speculator']):,}")
+        c_cot2.metric(f"{hedge_label} (Net)", f"{int(latest_cot['Net Hedger']):,}")
+        c_cot3.metric("Z-Score", f"{latest_cot['Spec Z-Score']:.2f}σ")
+        c_cot4.metric("Date", latest_cot['date'].strftime('%Y-%m-%d'))
         
-        # Speculator Net
-        spec_delta = latest_cot['Net Speculator'] - prev_cot['Net Speculator']
-        c_cot1.metric(f"{spec_label} (Net)", f"{int(latest_cot['Net Speculator']):,}", f"{int(spec_delta):,}")
-        
-        # Hedger Net
-        hedge_delta = latest_cot['Net Hedger'] - prev_cot['Net Hedger']
-        c_cot2.metric(f"{hedge_label} (Net)", f"{int(latest_cot['Net Hedger']):,}", f"{int(hedge_delta):,}", delta_color="inverse")
-        
-        # Z-Score
-        z_val = latest_cot['Spec Z-Score']
-        c_cot3.metric("Z-Score (52wk)", f"{z_val:.2f}σ", "Extreme" if abs(z_val) > 2 else "Neutral", delta_color="off")
-        
-        # Date
-        c_cot4.metric("Report Date", latest_cot['date'].strftime('%Y-%m-%d'))
-        
-        # 4. AI Interpretation Box
         st.info(generate_cot_analysis(latest_cot['Net Speculator'], latest_cot['Net Hedger'], spec_label, hedge_label))
         
-        # 5. VISUALIZATION TABS
-        tab_trend, tab_struct, tab_osc = st.tabs(["📈 NET TREND", "🦋 LONG/SHORT STRUCTURE", "📊 Z-SCORE OSCILLATOR"])
-        
+        tab_trend, tab_struct = st.tabs(["📈 TREND", "🦋 STRUCTURE"])
         with tab_trend:
             fig_trend = go.Figure()
             fig_trend.add_trace(go.Scatter(x=cot_history['date'], y=cot_history['Net Speculator'], name=spec_label, line=dict(color='#00FF00', width=2)))
             fig_trend.add_trace(go.Scatter(x=cot_history['date'], y=cot_history['Net Hedger'], name=hedge_label, line=dict(color='#FF0000', width=2)))
-            fig_trend.add_hline(y=0, line_dash="dash", line_color="gray")
-            terminal_chart_layout(fig_trend, title="NET POSITIONING HISTORY (Smart Money vs Specs)", height=400)
+            terminal_chart_layout(fig_trend, title="NET POSITIONING", height=350)
             st.plotly_chart(fig_trend, use_container_width=True)
-            
         with tab_struct:
             fig_struct = go.Figure()
-            # Speculator Longs (Green)
-            fig_struct.add_trace(go.Bar(
-                x=cot_history['date'], 
-                y=cot_history['spec_long'], 
-                name=f"{spec_label} Longs", 
-                marker_color='#00C805'
-            ))
-            # Speculator Shorts (Red) - Negative for Butterfly
-            fig_struct.add_trace(go.Bar(
-                x=cot_history['date'], 
-                y=-cot_history['spec_short'], 
-                name=f"{spec_label} Shorts", 
-                marker_color='#FF4B4B'
-            ))
+            fig_struct.add_trace(go.Bar(x=cot_history['date'], y=cot_history['spec_long'], name="Longs", marker_color='#00C805'))
+            fig_struct.add_trace(go.Bar(x=cot_history['date'], y=-cot_history['spec_short'], name="Shorts", marker_color='#FF4B4B'))
             fig_struct.update_layout(barmode='overlay')
-            terminal_chart_layout(fig_struct, title=f"{spec_label.upper()} STRUCTURE (Butterfly Chart)", height=400)
-            st.caption("Green Bars = Long Contracts. Red Bars = Short Contracts (Plotted Inversely).")
+            terminal_chart_layout(fig_struct, title=f"{spec_label.upper()} STRUCTURE", height=350)
             st.plotly_chart(fig_struct, use_container_width=True)
-            
-        with tab_osc:
-            fig_z = go.Figure()
-            colors = ['red' if val > 2 or val < -2 else 'gray' for val in cot_history['Spec Z-Score']]
-            fig_z.add_trace(go.Bar(x=cot_history['date'], y=cot_history['Spec Z-Score'], marker_color=colors, name="Z-Score"))
-            fig_z.add_hline(y=2, line_dash="dot", line_color="red", annotation_text="Overbought (+2σ)")
-            fig_z.add_hline(y=-2, line_dash="dot", line_color="red", annotation_text="Oversold (-2σ)")
-            terminal_chart_layout(fig_z, title="POSITIONING EXTREMES (Z-Score)", height=400)
-            st.plotly_chart(fig_z, use_container_width=True)
-            
-    else:
-        st.warning(f"COT Data retrieved but missing required columns for {selected_asset}. Try another asset.")
 else:
-    st.info(f"No COT Data available for {selected_asset}. This asset might not be a futures contract or mapping is missing.")
+    st.info(f"No COT Data for {selected_asset}.")
 
-# --- 9. INTELLIGENT EXECUTIVE SUMMARY & THESIS ---
+# --- 9. AI ANALYST ---
 st.markdown("---")
 st.markdown("### 🧠 AI QUANT ANALYST")
-# Prepare Data for LLM
-gex_summary = gex_df if gex_df is not None else None
-ml_signal_str = "BULLISH" if ml_prob > 0.55 else "BEARISH" if ml_prob < 0.45 else "NEUTRAL"
-news_text_summary = "\n".join([f"- {n['title']} ({n['source']})" for n in combined_news_for_llm])
 if gemini_key:
+    # --- 9A. EXECUTIVE SUMMARY (ON DEMAND ONLY) ---
     col_exec_btn, col_exec_info = st.columns([1, 4])
     with col_exec_btn:
         if st.button("📝 GENERATE BRIEF"):
-            with st.spinner("Analyzing Technicals + Macro..."):
+            with st.spinner("Analyzing Technicals..."):
                 narrative = get_technical_narrative(
                     ticker=selected_asset, price=curr, daily_pct=pct, regime=regime_data,
-                    ml_signal=ml_signal_str, gex_data=gex_summary, cot_data=cot_data,
+                    ml_signal=ml_bias, gex_data=gex_df, cot_data=cot_data,
                     levels=key_levels, macro_data=macro_context_data, api_key=gemini_key
                 )
                 st.session_state['narrative_cache'] = narrative
                 st.rerun()
     with col_exec_info:
-        st.markdown("<span style='color:gray; vertical-align:middle;'>3-bullet Executive Summary (Costs 1 Gemini Call)</span>", unsafe_allow_html=True)
+        st.markdown("<span style='color:gray; vertical-align:middle;'>Generates a 3-bullet Executive Summary (Costs 1 Gemini Call)</span>", unsafe_allow_html=True)
     if st.session_state['narrative_cache']:
-        if "⚠️" in st.session_state['narrative_cache']: st.error(st.session_state['narrative_cache'])
+        if "⚠️" in st.session_state['narrative_cache']:
+             st.error(st.session_state['narrative_cache'])
         else:
             st.markdown(f"""
             <div class='terminal-box' style='border-left: 4px solid #00e6ff;'>
@@ -1558,6 +1394,7 @@ if gemini_key:
             </div>
             """, unsafe_allow_html=True)
     
+    # --- 9B. THESIS MODE (ON DEMAND) ---
     st.markdown("---")
     col_thesis_btn, col_thesis_info = st.columns([1, 4])
     with col_thesis_btn:
@@ -1565,15 +1402,16 @@ if gemini_key:
             with st.spinner("Analyzing Macro, Gamma, and Order Flow..."):
                 thesis_text = generate_deep_dive_thesis(
                     ticker=selected_asset, price=curr, change=pct, regime=regime_data,
-                    ml_signal=ml_signal_str, gex_data=gex_summary, cot_data=cot_data,
+                    ml_signal=ml_bias, gex_data=gex_df, cot_data=cot_data,
                     levels=key_levels, news_summary=news_text_summary, macro_data=macro_context_data, api_key=gemini_key
                 )
                 st.session_state['thesis_cache'] = thesis_text
                 st.rerun()
     with col_thesis_info:
-        st.markdown("<span style='color:gray;'>Full 4-paragraph Hedge Fund style report. (Costs 1 Gemini Call)</span>", unsafe_allow_html=True)
+        st.markdown("<span style='color:gray;'>Generates a full 4-paragraph Hedge Fund style report. (Costs 1 Gemini Call)</span>", unsafe_allow_html=True)
     if st.session_state['thesis_cache']:
-        if "⚠️" in st.session_state['thesis_cache']: st.error(st.session_state['thesis_cache'])
+        if "⚠️" in st.session_state['thesis_cache']:
+             st.error(st.session_state['thesis_cache'])
         else:
             st.markdown(f"""
             <div class='terminal-box' style='border: 1px solid #444; padding: 20px;'>
