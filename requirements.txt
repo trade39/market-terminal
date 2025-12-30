@@ -11,3 +11,4 @@ lxml
 pytz
 cot_reports
 google-generativeai
+textblob
