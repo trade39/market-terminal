@@ -15,7 +15,7 @@ import os
 import time
 
 # --- APP CONFIGURATION ---
-st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V5.5", page_icon="💹")
+st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V5.6", page_icon="💹")
 
 # --- BLOOMBERG TERMINAL STYLING (CSS) ---
 st.markdown("""
@@ -50,9 +50,9 @@ st.markdown("""
     }
     
     /* Signal badges */
-    .bullish { color: #000000; background-color: #00ff00; padding: 2px 6px; font-weight: bold; }
-    .bearish { color: #000000; background-color: #ff3333; padding: 2px 6px; font-weight: bold; }
-    .neutral { color: #000000; background-color: #cccccc; padding: 2px 6px; font-weight: bold; }
+    .bullish { color: #000000; background-color: #00ff00; padding: 2px 6px; font-weight: bold; border-radius: 4px; }
+    .bearish { color: #000000; background-color: #ff3333; padding: 2px 6px; font-weight: bold; border-radius: 4px; }
+    .neutral { color: #000000; background-color: #cccccc; padding: 2px 6px; font-weight: bold; border-radius: 4px; }
     
     /* News Link */
     .news-link { color: #00e6ff; text-decoration: none; font-size: 0.9em; }
@@ -448,7 +448,6 @@ def get_seasonality_stats(daily_data, ticker_name):
 
 @st.cache_data(ttl=3600)
 def generate_monte_carlo(stock_data, days=126, simulations=1000):
-    # CRITICAL FIX: Check for empty data before processing
     if stock_data is None or stock_data.empty or len(stock_data) < 2:
         return None, None
     try:
@@ -464,6 +463,64 @@ def generate_monte_carlo(stock_data, days=126, simulations=1000):
         return pd.date_range(start=close.index[-1], periods=days + 1, freq='B'), price_paths
     except Exception as e:
         return None, None
+
+# --- NEW: TECHNICAL RADAR ENGINE (ZERO-DEPENDENCY) ---
+def calculate_technical_radar(df):
+    """Calculates RSI, MACD, BB, and EMA using standard Pandas vectorization."""
+    if df.empty or len(df) < 30: return None
+    
+    data = df.copy()
+    close = data['Close']
+    
+    # 1. RSI (14)
+    delta = close.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / loss
+    data['RSI'] = 100 - (100 / (1 + rs))
+    
+    # 2. MACD (12, 26, 9)
+    k = close.ewm(span=12, adjust=False, min_periods=12).mean()
+    d = close.ewm(span=26, adjust=False, min_periods=26).mean()
+    data['MACD'] = k - d
+    data['MACD_Signal'] = data['MACD'].ewm(span=9, adjust=False, min_periods=9).mean()
+    
+    # 3. Bollinger Bands (20, 2)
+    data['BB_Mid'] = close.rolling(window=20).mean()
+    data['BB_Std'] = close.rolling(window=20).std()
+    data['BB_Up'] = data['BB_Mid'] + (2 * data['BB_Std'])
+    data['BB_Low'] = data['BB_Mid'] - (2 * data['BB_Std'])
+    
+    # 4. EMAs (Trend)
+    data['EMA_20'] = close.ewm(span=20, adjust=False).mean()
+    data['EMA_50'] = close.ewm(span=50, adjust=False).mean()
+    
+    # Extract Latest Values
+    last = data.iloc[-1]
+    
+    # Logic Processing
+    signals = {}
+    
+    # RSI Logic
+    if last['RSI'] < 30: signals['RSI'] = {"val": f"{last['RSI']:.0f}", "bias": "OVERSOLD (Bull)", "col": "bullish"}
+    elif last['RSI'] > 70: signals['RSI'] = {"val": f"{last['RSI']:.0f}", "bias": "OVERBOUGHT (Bear)", "col": "bearish"}
+    else: signals['RSI'] = {"val": f"{last['RSI']:.0f}", "bias": "NEUTRAL", "col": "neutral"}
+    
+    # MACD Logic
+    macd_hist = last['MACD'] - last['MACD_Signal']
+    if macd_hist > 0 and last['MACD'] > 0: signals['MACD'] = {"val": f"{macd_hist:.2f}", "bias": "BULLISH", "col": "bullish"}
+    elif macd_hist < 0 and last['MACD'] < 0: signals['MACD'] = {"val": f"{macd_hist:.2f}", "bias": "BEARISH", "col": "bearish"}
+    else: signals['MACD'] = {"val": f"{macd_hist:.2f}", "bias": "NEUTRAL", "col": "neutral"}
+    
+    # Trend Logic (EMA)
+    if last['Close'] > last['EMA_20'] and last['EMA_20'] > last['EMA_50']:
+        signals['Trend'] = {"val": "Uptrend", "bias": "STRONG BULL", "col": "bullish"}
+    elif last['Close'] < last['EMA_20'] and last['EMA_20'] < last['EMA_50']:
+        signals['Trend'] = {"val": "Downtrend", "bias": "STRONG BEAR", "col": "bearish"}
+    else:
+        signals['Trend'] = {"val": "Chop", "bias": "WEAK/MIXED", "col": "neutral"}
+        
+    return signals
 
 # --- 6. NEWS & ECONOMICS ---
 def parse_eco_value(val_str):
@@ -870,7 +927,7 @@ with st.sidebar:
         st.rerun()
 
 # --- MAIN DASHBOARD ---
-st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V5.5</span></h1>", unsafe_allow_html=True)
+st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V5.6</span></h1>", unsafe_allow_html=True)
 
 # Fetch Data
 daily_data = get_daily_data(asset_info['ticker'])
@@ -891,6 +948,7 @@ vol_profile, poc_price = calculate_volume_profile(intraday_data)
 hurst = calculate_hurst(daily_data['Close'].values) if not daily_data.empty else 0.5
 regime_data = get_market_regime(asset_info['ticker'])
 cot_data = get_cot_data(selected_asset) # Fetch COT Data
+tech_radar = calculate_technical_radar(daily_data) # Calculate Tech Radar
 
 # --- 1. OVERVIEW ---
 if not daily_data.empty:
@@ -940,7 +998,40 @@ if not daily_data.empty:
     fig.update_xaxes(rangeslider_visible=False)
     st.plotly_chart(fig, use_container_width=True)
 
-# --- 1B. COINGECKO INTEGRATION (DEMO SAFE) ---
+# --- 1B. TECHNICAL RADAR (NEW) ---
+st.markdown("---")
+st.markdown("### 📡 TECHNICAL RADAR (TRIANGULATION)")
+if tech_radar:
+    tr1, tr2, tr3 = st.columns(3)
+    
+    with tr1:
+        st.markdown(f"""
+        <div class='terminal-box'>
+            <div style='color:gray; font-size:0.8em;'>MOMENTUM (RSI)</div>
+            <div style='font-size:1.5em;'>{tech_radar['RSI']['val']}</div>
+            <span class='{tech_radar['RSI']['col']}'>{tech_radar['RSI']['bias']}</span>
+        </div>
+        """, unsafe_allow_html=True)
+        
+    with tr2:
+        st.markdown(f"""
+        <div class='terminal-box'>
+            <div style='color:gray; font-size:0.8em;'>TREND (EMA)</div>
+            <div style='font-size:1.5em;'>{tech_radar['Trend']['val']}</div>
+            <span class='{tech_radar['Trend']['col']}'>{tech_radar['Trend']['bias']}</span>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with tr3:
+        st.markdown(f"""
+        <div class='terminal-box'>
+            <div style='color:gray; font-size:0.8em;'>MACD (MOMENTUM)</div>
+            <div style='font-size:1.5em;'>{tech_radar['MACD']['val']}</div>
+            <span class='{tech_radar['MACD']['col']}'>{tech_radar['MACD']['bias']}</span>
+        </div>
+        """, unsafe_allow_html=True)
+
+# --- 1C. COINGECKO INTEGRATION (DEMO SAFE) ---
 cg_id = asset_info.get('cg_id')
 if cg_id and cg_key:
     st.markdown("---")
