@@ -15,7 +15,7 @@ import os
 import time
 
 # --- APP CONFIGURATION ---
-st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V4.7", page_icon="💹")
+st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V5.3", page_icon="💹")
 
 # --- BLOOMBERG TERMINAL STYLING (CSS) ---
 st.markdown("""
@@ -167,11 +167,11 @@ def get_coingecko_stats(cg_id, api_key):
 @st.cache_data(ttl=900) # CACHE: 15 Mins
 def get_technical_narrative(ticker, price, daily_pct, regime, ml_signal, gex_data, cot_data, levels, api_key):
     """
-    Sends data to Gemini. Dynamically finds available models to prevent 404s.
+    Standard View: 3 Bullet Executive Summary.
     """
     if not api_key: return "AI Analyst unavailable (No Key)."
     
-    # 1. Format the prompt
+    # Format data for Prompt
     gex_text = "N/A"
     if gex_data is not None:
         total_gex = gex_data['gex'].sum()
@@ -204,8 +204,6 @@ def get_technical_narrative(ticker, price, daily_pct, regime, ml_signal, gex_dat
     try:
         genai.configure(api_key=api_key)
         
-        # 2. AUTO-DISCOVER VALID MODELS
-        # Instead of guessing names, we ask Google: "What models can I use?"
         available_models = []
         try:
             for m in genai.list_models():
@@ -217,19 +215,71 @@ def get_technical_narrative(ticker, price, daily_pct, regime, ml_signal, gex_dat
         if not available_models:
             return "Error: No models found. Your API Key may be invalid or lacks permissions."
             
-        # 3. PREFER FLASH -> PRO -> OTHERS
-        # Sort so that 'flash' models come first
+        # Prefer Flash for speed
         available_models.sort(key=lambda x: 'flash' not in x.name) 
-        
         chosen_model = available_models[0]
         
-        # 4. EXECUTE
         model = genai.GenerativeModel(chosen_model.name)
         response = model.generate_content(prompt)
         return response.text
             
     except Exception as e:
         return f"AI Analyst unavailable: {str(e)}"
+
+# --- NEW: DEEP DIVE THESIS GENERATOR ---
+def generate_deep_dive_thesis(ticker, price, change, regime, ml_signal, gex_data, cot_data, levels, news_summary, api_key):
+    """
+    On-Demand View: Full 4-Paragraph Investment Thesis.
+    """
+    if not api_key: return "API Key Missing."
+    
+    gex_text = "N/A"
+    if gex_data is not None:
+        total_gex = gex_data['gex'].sum()
+        gex_text = f"Net Gamma: ${total_gex/1_000_000:.1f}M ({'Long/Sticky' if total_gex>0 else 'Short/Volatile'})"
+
+    lvl_text = "N/A"
+    if levels:
+        lvl_text = f"Pivot: {levels['Pivot']:.2f}, R1: {levels['R1']:.2f}, S1: {levels['S1']:.2f}"
+
+    prompt = f"""
+    You are a Senior Investment Strategist. Write a detailed "Deep Dive" Investment Thesis for {ticker}.
+    
+    ### INPUT DATA
+    - Price: {price:,.2f} ({change:.2f}%)
+    - Trend Regime: {regime['regime'] if regime else 'Unknown'}
+    - ML Probability: {ml_signal}
+    - GEX (Volatility): {gex_text}
+    - COT (Positioning): {cot_data['sentiment'] if cot_data else 'N/A'}
+    - Key Levels: {lvl_text}
+    - Recent News/Context: {news_summary}
+
+    ### REQUIRED OUTPUT FORMAT (MARKDOWN)
+    
+    ### 1. THE CORE ARGUMENT
+    (State clearly if we are Long, Short, or Neutral. Connect the Macro News with the Trend Regime. Be opinionated.)
+    
+    ### 2. SUPPORTING DATA
+    (Cite the specific numbers provided above. e.g., "The bullish case is supported by Positive Gamma of $XM..." or "Smart Money is shorting into strength...")
+    
+    ### 3. THE BEAR CASE (RISKS)
+    (What kills this trade? Is it a Fed announcement? A break of the Pivot level?)
+    
+    ### 4. INVALIDATION LEVEL
+    (At what specific price does this thesis fail? Use the Key Levels provided.)
+    """
+    
+    try:
+        genai.configure(api_key=api_key)
+        # We find models again to be safe
+        available_models = [m for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        available_models.sort(key=lambda x: 'flash' not in x.name)
+        
+        model = genai.GenerativeModel(available_models[0].name)
+        response = model.generate_content(prompt)
+        return response.text
+    except Exception as e:
+        return f"Thesis Generation Failed: {str(e)}"
 
 # --- 1. QUANT ENGINE (GMM + HURST) ---
 def calculate_hurst(series, lags=range(2, 20)):
@@ -828,7 +878,7 @@ with st.sidebar:
     if st.button(">> REFRESH DATA"): st.cache_data.clear()
 
 # --- MAIN DASHBOARD ---
-st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V4.7</span></h1>", unsafe_allow_html=True)
+st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V5.3</span></h1>", unsafe_allow_html=True)
 
 # Fetch Data
 daily_data = get_daily_data(asset_info['ticker'])
@@ -1099,7 +1149,7 @@ if not vwap_df.empty:
     
     # 1. Price Candles
     fig_vwap.add_trace(go.Candlestick(x=vwap_df.index, open=vwap_df['Open'], high=vwap_df['High'], 
-                                      low=vwap_df['Low'], close=vwap_df['Close'], name="Price"))
+                                    low=vwap_df['Low'], close=vwap_df['Close'], name="Price"))
     
     # 2. Session VWAP
     fig_vwap.add_trace(go.Scatter(x=vwap_df.index, y=vwap_df['VWAP'], name="Session VWAP", line=dict(color='#ff9900', width=2)))
@@ -1218,19 +1268,21 @@ if cot_data:
     </div>
     """, unsafe_allow_html=True)
 
-# --- 9. INTELLIGENT EXECUTIVE SUMMARY ---
+# --- 9. INTELLIGENT EXECUTIVE SUMMARY & THESIS ---
 st.markdown("---")
 st.markdown("### 🧠 AI QUANT ANALYST")
 
-# 1. Prepare Data for LLM
+# Prepare General Data for LLM
 gex_summary = gex_df if gex_df is not None else None
 ml_signal_str = "BULLISH" if ml_prob > 0.55 else "BEARISH" if ml_prob < 0.45 else "NEUTRAL"
 
+# Create formatted News Summary for Deep Dive
+news_text_summary = "\n".join([f"- {n['title']} ({n['source']})" for n in combined_news_for_llm])
+
 if gemini_key:
-    # Check if we should render the AI section (Lazy Load to save API calls)
+    # --- 9A. EXECUTIVE SUMMARY (DEFAULT) ---
     with st.spinner("👨‍💻 Quant Analyst is synthesizing data..."):
         # We pass the raw quantitative data to the LLM
-        # CACHED for 15 mins to protect API limits
         narrative = get_technical_narrative(
             ticker=selected_asset,
             price=curr,
@@ -1249,5 +1301,36 @@ if gemini_key:
         <div style='font-family: monospace; font-size: 0.95em; white-space: pre-wrap;'>{narrative}</div>
     </div>
     """, unsafe_allow_html=True)
+    
+    # --- 9B. THESIS MODE (ON DEMAND) ---
+    st.markdown("---")
+    col_thesis_btn, col_thesis_info = st.columns([1, 3])
+    with col_thesis_btn:
+        generate_thesis = st.button("📝 GENERATE DEEP DIVE THESIS")
+        
+    with col_thesis_info:
+        st.markdown("<span style='color:gray; font-size:0.8em;'>Generates a full 4-paragraph Hedge Fund style report including Macro, Technicals, and Bear/Bull cases. (Slower)</span>", unsafe_allow_html=True)
+
+    if generate_thesis:
+        with st.spinner("🕵️‍♂️ Analyzing Macro, Gamma, and Order Flow... (approx 10s)"):
+            thesis_text = generate_deep_dive_thesis(
+                ticker=selected_asset,
+                price=curr,
+                change=pct,
+                regime=regime_data,
+                ml_signal=ml_signal_str,
+                gex_data=gex_summary,
+                cot_data=cot_data,
+                levels=key_levels,
+                news_summary=news_text_summary,
+                api_key=gemini_key
+            )
+            
+            st.markdown(f"""
+            <div class='terminal-box' style='border: 1px solid #444; padding: 20px;'>
+                {thesis_text}
+            </div>
+            """, unsafe_allow_html=True)
+
 else:
     st.info("Add GEMINI_API_KEY to see the AI Analyst Report.")
