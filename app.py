@@ -31,7 +31,7 @@ except ImportError:
     HAS_COT_LIB = False
 
 # --- APP CONFIGURATION ---
-st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V5.15", page_icon="💹")
+st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V5.16", page_icon="💹")
 
 # --- BLOOMBERG TERMINAL STYLING (CSS) ---
 st.markdown("""
@@ -705,24 +705,23 @@ def get_correlations(base_ticker, api_key):
         return corrs.drop('Base') 
     except: return pd.Series()
 
-# --- COT DATA (UPDATED: ROBUST & NO DEPENDENCY REQUIRED) ---
+# --- COT DATA (UPDATED: WITH HISTORY & CHARTING) ---
 @st.cache_data(ttl=86400)
 def get_cot_data(asset_name):
     if asset_name not in COT_MAPPING: return None
     contract_name = COT_MAPPING[asset_name]["name"]
     
-    # 1. Try to use the library first
+    # 1. Fetch Data (Library or Direct)
+    df = pd.DataFrame()
     if HAS_COT_LIB:
         try:
-            # Use current year, fallback to previous if early in year
             year = datetime.now().year
             df = pd.DataFrame(cot.cot_year(year, cot_report_type='legacy_fut'))
-            if df.empty:
+            if df.empty or len(df) < 5:
                 df = pd.DataFrame(cot.cot_year(year - 1, cot_report_type='legacy_fut'))
-        except:
-            df = pd.DataFrame()
-    else:
-        # 2. Fallback: Direct Fetch (No Library Needed)
+        except: pass
+    
+    if df.empty:
         try:
             year = datetime.now().year
             url = f"https://www.cftc.gov/files/dea/history/deahistfo{year}.zip"
@@ -734,42 +733,37 @@ def get_cot_data(asset_name):
             
             if r.status_code == 200:
                 with zipfile.ZipFile(io.BytesIO(r.content)) as z:
-                    # File inside is usually 'annual.txt' or similar
                     filename = z.namelist()[0]
                     with z.open(filename) as f:
                         df = pd.read_csv(f, low_memory=False)
-            else:
-                df = pd.DataFrame()
-        except:
-            df = pd.DataFrame()
+        except: pass
 
     if df.empty: return None
 
     try:
-        # Normalize column names (Legacy Report)
-        # Library vs Raw CSV might differ slightly, but typically match
-        # We need: 'Market_and_Exchange_Names', 'As_of_Date_In_Form_YYMMDD'
-        # 'NonComm_Positions_Long_All', 'NonComm_Positions_Short_All'
-        # 'Comm_Positions_Long_All', 'Comm_Positions_Short_All'
-        
         # Filter by Contract
         asset_df = df[df['Market_and_Exchange_Names'].str.strip() == contract_name].copy()
         if asset_df.empty: return None
         
         asset_df['Date'] = pd.to_datetime(asset_df['As_of_Date_In_Form_YYMMDD'], format='%y%m%d')
-        latest = asset_df.sort_values('Date').iloc[-1]
         
-        comm_net = latest['Comm_Positions_Long_All'] - latest['Comm_Positions_Short_All']
-        spec_net = latest['NonComm_Positions_Long_All'] - latest['NonComm_Positions_Short_All']
+        # Calculate Net Positions for History
+        asset_df['Comm_Net'] = asset_df['Comm_Positions_Long_All'] - asset_df['Comm_Positions_Short_All']
+        asset_df['Spec_Net'] = asset_df['NonComm_Positions_Long_All'] - asset_df['NonComm_Positions_Short_All']
         
-        sentiment = "BULLISH" if comm_net > 0 else "BEARISH"
+        # Get History (Last 6 months approx 26 weeks)
+        history = asset_df.sort_values('Date').tail(26)
+        latest = history.iloc[-1]
+        
+        sentiment = "BULLISH" if latest['Comm_Net'] > 0 else "BEARISH"
         if asset_name in ["S&P 500", "NASDAQ", "Bitcoin"]: sentiment = "HEDGED (See Specs)"
         
         return {
             "date": latest['Date'].strftime('%Y-%m-%d'),
-            "comm_net": comm_net,
-            "spec_net": spec_net,
-            "sentiment": sentiment
+            "comm_net": latest['Comm_Net'],
+            "spec_net": latest['Spec_Net'],
+            "sentiment": sentiment,
+            "history": history[['Date', 'Comm_Net', 'Spec_Net']]
         }
     except Exception as e:
         return None
@@ -841,7 +835,7 @@ with st.sidebar:
         st.rerun()
 
 # --- MAIN DASHBOARD ---
-st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V5.15</span></h1>", unsafe_allow_html=True)
+st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V5.16</span></h1>", unsafe_allow_html=True)
 
 # Fetch Data
 daily_data = get_daily_data(asset_info['ticker'])
@@ -1369,12 +1363,13 @@ if pred_dates is not None and pred_paths is not None:
     terminal_chart_layout(fig_pred, title="MONTE CARLO PROJECTION (126 Days)", height=400)
     st.plotly_chart(fig_pred, use_container_width=True)
 
-# --- 8. RESTORED: CFTC COT DISPLAY ---
+# --- 8. RESTORED: CFTC COT DISPLAY (VISUALS ADDED) ---
 if cot_data:
     st.markdown("---")
     st.markdown("### 🏛️ CFTC COMMITMENTS OF TRADERS")
-    c_cot1, c_cot2, c_cot3 = st.columns(3)
     
+    # 1. Metrics Top Row
+    c_cot1, c_cot2, c_cot3 = st.columns(3)
     c_cot1.metric("Commercials (Smart Money)", f"{cot_data['comm_net']:,.0f}", help="Commercial Hedgers Net Position")
     c_cot2.metric("Speculators (Funds)", f"{cot_data['spec_net']:,.0f}", help="Non-Commercial/Managed Money Net Position")
     c_cot3.markdown(f"""
@@ -1384,6 +1379,30 @@ if cot_data:
         <div style='font-size:0.7em;'>Date: {cot_data['date']}</div>
     </div>
     """, unsafe_allow_html=True)
+    
+    # 2. History Chart (NEW)
+    if 'history' in cot_data and not cot_data['history'].empty:
+        history = cot_data['history']
+        fig_cot = go.Figure()
+        
+        # Commercials (Smart Money) - Usually Green/Bullish
+        fig_cot.add_trace(go.Scatter(
+            x=history['Date'], y=history['Comm_Net'],
+            name='Commercials (Hedgers)',
+            line=dict(color='#00ff00', width=2)
+        ))
+        
+        # Speculators (Funds) - Usually Opposite
+        fig_cot.add_trace(go.Scatter(
+            x=history['Date'], y=history['Spec_Net'],
+            name='Speculators (Funds)',
+            line=dict(color='#ff00ff', width=2, dash='dot')
+        ))
+        
+        fig_cot.add_hline(y=0, line_color='gray', line_dash='dash')
+        
+        terminal_chart_layout(fig_cot, title="INSTITUTIONAL POSITIONING TREND (6 Months)", height=350)
+        st.plotly_chart(fig_cot, use_container_width=True)
 
 # --- 9. INTELLIGENT EXECUTIVE SUMMARY & THESIS ---
 st.markdown("---")
