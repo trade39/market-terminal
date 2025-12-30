@@ -731,7 +731,7 @@ with st.sidebar:
         st.rerun()
 
 # --- MAIN DASHBOARD ---
-st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V5.13</span></h1>", unsafe_allow_html=True)
+st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V5.13.1</span></h1>", unsafe_allow_html=True)
 
 # Fetch Data
 daily_data = get_daily_data(asset_info['ticker'])
@@ -839,7 +839,9 @@ if not daily_data.empty:
             overlaying="y",
             side="right",
             showgrid=False,
-            font=dict(color="orange")
+            # FIXED: 'font' is invalid in yaxis dict. Use title_font and tickfont instead.
+            title_font=dict(color="orange"),
+            tickfont=dict(color="orange")
         ),
         font=dict(family="Courier New", color="#e0e0e0"),
         legend=dict(orientation="h", y=1.02, x=0, bgcolor="rgba(0,0,0,0)")
