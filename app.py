@@ -15,7 +15,7 @@ import os
 import time
 
 # --- APP CONFIGURATION ---
-st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V5.9", page_icon="💹")
+st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V5.10", page_icon="💹")
 
 # --- BLOOMBERG TERMINAL STYLING (CSS) ---
 st.markdown("""
@@ -695,7 +695,14 @@ def get_key_levels(daily_df):
 @st.cache_data(ttl=3600)
 def get_correlations(base_ticker):
     try:
-        tickers = {"Base": base_ticker, "VIX": "^VIX", "10Y Yield": "^TNX", "Dollar": "DX-Y.NYB", "Gold": "GC=F"}
+        # DX=F (Futures) is much more stable than DX-Y.NYB
+        tickers = {
+            "Base": base_ticker, 
+            "VIX": "^VIX", 
+            "10Y Yield": "^TNX", 
+            "Dollar": "DX=F", 
+            "Gold": "GC=F"
+        }
         data = safe_yf_download(list(tickers.values()), period="6mo", interval="1d")
         if data.empty: return pd.Series()
         data = data['Close']
@@ -781,7 +788,7 @@ with st.sidebar:
         st.rerun()
 
 # --- MAIN DASHBOARD ---
-st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V5.9</span></h1>", unsafe_allow_html=True)
+st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V5.10</span></h1>", unsafe_allow_html=True)
 
 # Fetch Data
 daily_data = get_daily_data(asset_info['ticker'])
