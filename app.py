@@ -31,7 +31,7 @@ except ImportError:
     HAS_COT_LIB = False
 
 # --- APP CONFIGURATION ---
-st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V5.17", page_icon="⚡")
+st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V5.18", page_icon="⚡")
 
 # --- BLOOMBERG TERMINAL STYLING (CSS) ---
 st.markdown("""
@@ -614,24 +614,51 @@ def get_forex_factory_news(api_key, news_type='breaking'):
         return normalized_news
     except: return []
 
+# --- NEW: ECONOMIC CALENDAR WITH MOCK/DEMO SUPPORT ---
+def get_mock_calendar_data():
+    """Returns mock data formatted exactly how the app expects it for seamless testing."""
+    return [
+        {"currency": "USD", "impact": "High", "event_name": "[DEMO] Unemployment Claims", "actual": "210K", "forecast": "215K", "previous": "208K", "time": "8:30am"},
+        {"currency": "USD", "impact": "High", "event_name": "[DEMO] Philly Fed Mfg Index", "actual": "15.5", "forecast": "8.0", "previous": "12.2", "time": "8:30am"},
+        {"currency": "USD", "impact": "Medium", "event_name": "[DEMO] Natural Gas Storage", "actual": "85B", "forecast": "82B", "previous": "79B", "time": "10:30am"},
+        {"currency": "USD", "impact": "High", "event_name": "[DEMO] Powell Speaks", "actual": "", "forecast": "", "previous": "", "time": "2:00pm"},
+    ]
+
 @st.cache_data(ttl=21600)
-def get_economic_calendar(api_key):
-    if not api_key: return None
+def get_economic_calendar(api_key, use_demo=False):
+    # 1. Check Demo Mode Flag
+    if use_demo:
+        return get_mock_calendar_data()
+
+    # 2. Check API Key
+    if not api_key: 
+        return get_mock_calendar_data() # Fallback if no key
+
     st.session_state['rapid_calls'] += 1
     try:
         url = "https://forex-factory-scraper1.p.rapidapi.com/get_real_time_calendar_details"
         now = datetime.now()
         querystring = {"calendar": "Forex", "year": str(now.year), "month": str(now.month), "day": str(now.day), "currency": "ALL", "event_name": "ALL", "timezone": "GMT-04:00 Eastern Time (US & Canada)", "time_format": "12h"}
         headers = {"x-rapidapi-host": "forex-factory-scraper1.p.rapidapi.com", "x-rapidapi-key": api_key}
+        
         response = requests.get(url, headers=headers, params=querystring)
+        
+        # 3. Handle 429 Limit Logic (Quota Saver)
+        if response.status_code == 429:
+            return get_mock_calendar_data() # Fallback on limit reached
+            
         data = response.json()
         raw_events = data if isinstance(data, list) else data.get('data', [])
+        
         filtered_events = []
         for e in raw_events:
             if e.get('currency') == 'USD' and (e.get('impact') == 'High' or e.get('impact') == 'Medium'):
                 filtered_events.append(e)
+                
         if filtered_events: return filtered_events
-    except: pass 
+    except: 
+        pass 
+    
     return []
 
 # --- TRADING LOGIC ---
@@ -878,6 +905,9 @@ with st.sidebar:
     selected_asset = st.selectbox("SEC / Ticker", list(ASSETS.keys()))
     asset_info = ASSETS[selected_asset]
     
+    # --- UPDATED: QUOTA SAVER TOGGLE ---
+    use_demo_data = st.checkbox("🛠️ USE DEMO DATA (Save Quota)", value=True, help="Use mock data for Calendar to save RapidAPI credits.")
+    
     st.markdown("---")
     
     with st.expander("📡 API QUOTA MONITOR", expanded=True):
@@ -890,6 +920,11 @@ with st.sidebar:
         st.progress(min(st.session_state['rapid_calls'] / 10, 1.0))
         st.write(f"**FRED** ({st.session_state['fred_calls']} calls)")
         st.write(f"**CoinGecko** ({st.session_state['coingecko_calls']} calls)")
+        
+        if use_demo_data:
+            st.success("🟢 DEMO MODE ACTIVE")
+        else:
+            st.warning("🔴 LIVE API MODE")
         
         # Dependency Status
         if not HAS_NLP:
@@ -909,13 +944,15 @@ with st.sidebar:
         st.rerun()
 
 # --- MAIN DASHBOARD ---
-st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V5.17</span></h1>", unsafe_allow_html=True)
+st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V5.18</span></h1>", unsafe_allow_html=True)
 
 # Fetch Data
 daily_data = get_daily_data(asset_info['ticker'])
 dxy_data = get_dxy_data()
 intraday_data = get_intraday_data(asset_info['ticker'])
-eco_events = get_economic_calendar(rapid_key)
+
+# --- UPDATED: FETCH CALENDAR WITH TOGGLE ---
+eco_events = get_economic_calendar(rapid_key, use_demo=use_demo_data)
 
 # Fetch News from BOTH sources
 news_general = get_financial_news_general(news_key, query=asset_info.get('news_query', 'Finance'))
@@ -1142,6 +1179,10 @@ st.markdown("---")
 col_eco, col_news = st.columns([2, 1])
 with col_eco:
     st.markdown("### 📅 ECONOMIC EVENTS (USD)")
+    # Check if we are in demo mode for UI feedback
+    if use_demo_data:
+        st.caption("🟢 USING DEMO DATA (API Quota Saver Active)")
+    
     if eco_events:
         cal_data = []
         for event in eco_events:
@@ -1542,7 +1583,7 @@ if gemini_key:
             with st.spinner("Analyzing Technicals + Macro..."):
                 narrative = get_technical_narrative(
                     ticker=selected_asset, price=curr, daily_pct=pct, regime=regime_data,
-                    ml_signal=ml_signal_str, gex_data=gex_summary, cot_data=cot_data,
+                    ml_signal=ml_signal_str, gex_data=gex_summary, cot_data=cot_data if 'cot_data' in locals() else None,
                     levels=key_levels, macro_data=macro_context_data, api_key=gemini_key
                 )
                 st.session_state['narrative_cache'] = narrative
@@ -1565,7 +1606,7 @@ if gemini_key:
             with st.spinner("Analyzing Macro, Gamma, and Order Flow..."):
                 thesis_text = generate_deep_dive_thesis(
                     ticker=selected_asset, price=curr, change=pct, regime=regime_data,
-                    ml_signal=ml_signal_str, gex_data=gex_summary, cot_data=cot_data,
+                    ml_signal=ml_signal_str, gex_data=gex_summary, cot_data=cot_data if 'cot_data' in locals() else None,
                     levels=key_levels, news_summary=news_text_summary, macro_data=macro_context_data, api_key=gemini_key
                 )
                 st.session_state['thesis_cache'] = thesis_text
