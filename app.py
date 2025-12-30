@@ -15,7 +15,7 @@ import os
 import time
 
 # --- APP CONFIGURATION ---
-st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V5.10", page_icon="💹")
+st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V5.11", page_icon="💹")
 
 # --- BLOOMBERG TERMINAL STYLING (CSS) ---
 st.markdown("""
@@ -354,10 +354,6 @@ def get_macro_ml_regime(cpi_df, rate_df):
         current_state = gmm.predict(X[[-1]])[0]
         
         # Heuristic Naming based on centroids
-        means = gmm.means_ # [CPI, Rates]
-        # State logic is complex to generalize, so we use simplified mapping based on the specific state properties
-        # But for display we will simply return the Cluster ID and description based on current values
-        
         curr_cpi = df['CPI_YoY'].iloc[-1]
         curr_rate = df['Rates'].iloc[-1]
         
@@ -693,24 +689,65 @@ def get_key_levels(daily_df):
     return {"PDH": high, "PDL": low, "PDC": close, "Pivot": pivot, "R1": (2 * pivot) - low, "S1": (2 * pivot) - high}
 
 @st.cache_data(ttl=3600)
-def get_correlations(base_ticker):
+def get_correlations(base_ticker, api_key): # UPDATED: Accepts API Key
     try:
-        # DX=F (Futures) is much more stable than DX-Y.NYB
+        # 1. Fetch YF Data (Base, VIX, Yield, Gold)
         tickers = {
-            "Base": base_ticker, 
-            "VIX": "^VIX", 
-            "10Y Yield": "^TNX", 
-            "Dollar": "DX=F", 
+            "Base": base_ticker,
+            "VIX": "^VIX",
+            "10Y Yield": "^TNX",
             "Gold": "GC=F"
         }
-        data = safe_yf_download(list(tickers.values()), period="6mo", interval="1d")
-        if data.empty: return pd.Series()
-        data = data['Close']
-        rev_tickers = {v: k for k, v in tickers.items()}
-        data.rename(columns=rev_tickers, inplace=True)
-        corrs = data.pct_change().rolling(20).corr(data[base_ticker].pct_change()).iloc[-1]
-        return corrs.drop(base_ticker) 
-    except: return pd.Series()
+        yf_data = safe_yf_download(list(tickers.values()), period="6mo", interval="1d")
+        
+        # 2. Fetch FRED Data (DXY Proxy)
+        # DTWEXAFEGS: Trade Weighted U.S. Dollar Index: Advanced Foreign Economies
+        # This tracks EUR, JPY, GBP, etc. closely matching the standard DXY.
+        fred_data = get_fred_series("DTWEXAFEGS", api_key) 
+        
+        if yf_data.empty: return pd.Series()
+        
+        # Cleanup YF
+        # yf_data usually has 'Close' as a level if multi-ticker
+        if isinstance(yf_data.columns, pd.MultiIndex):
+            yf_df = yf_data['Close'].copy()
+        elif 'Close' in yf_data.columns:
+            yf_df = yf_data['Close'].copy()
+        else:
+            yf_df = yf_data.copy()
+            
+        # Check if single ticker (Series) or DataFrame
+        if isinstance(yf_df, pd.Series):
+             yf_df = yf_df.to_frame(name=list(tickers.keys())[0])
+
+        # Rename columns safely
+        # Note: safe_yf_download might return columns as tickers. 
+        # We need to map them back.
+        # This is a bit tricky with auto-download. simpler to just rely on column names matching values.
+        # But let's try a safe rename if columns match
+        found_cols = {c: k for k, v in tickers.items() if v in yf_df.columns}
+        yf_df.rename(columns=found_cols, inplace=True)
+        
+        # Cleanup FRED
+        combined = yf_df
+        if not fred_data.empty:
+            fred_data = fred_data.rename(columns={'value': 'Dollar'})
+            # Merge: FRED is daily index, YF is daily index. 
+            # FRED index is naive datetime, YF is often TZ-aware.
+            # Normalize to naive for merge.
+            if yf_df.index.tz is not None:
+                yf_df.index = yf_df.index.tz_localize(None)
+            
+            combined = pd.concat([yf_df, fred_data], axis=1).dropna()
+            
+        if combined.empty or 'Base' not in combined.columns: return pd.Series()
+
+        # Correlation Calculation
+        corrs = combined.pct_change().rolling(20).corr(combined['Base'].pct_change()).iloc[-1]
+        return corrs.drop('Base') 
+    except Exception as e:
+        print(f"Corr Error: {e}")
+        return pd.Series()
 
 @st.cache_data(ttl=86400)
 def get_cot_data(asset_name):
@@ -788,7 +825,7 @@ with st.sidebar:
         st.rerun()
 
 # --- MAIN DASHBOARD ---
-st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V5.10</span></h1>", unsafe_allow_html=True)
+st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V5.11</span></h1>", unsafe_allow_html=True)
 
 # Fetch Data
 daily_data = get_daily_data(asset_info['ticker'])
@@ -808,7 +845,7 @@ hurst = calculate_hurst(daily_data['Close'].values) if not daily_data.empty else
 regime_data = get_market_regime(asset_info['ticker'])
 cot_data = get_cot_data(selected_asset) # Fetch COT Data
 tech_radar = calculate_technical_radar(daily_data) # Calculate Tech Radar
-correlations = get_correlations(asset_info['ticker'])
+correlations = get_correlations(asset_info['ticker'], fred_key) # UPDATED CALL
 
 # --- 1. OVERVIEW ---
 if not daily_data.empty:
