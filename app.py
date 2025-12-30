@@ -31,7 +31,7 @@ except ImportError:
     HAS_COT_LIB = False
 
 # --- APP CONFIGURATION ---
-st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V5.16", page_icon="💹")
+st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V5.17", page_icon="⚡")
 
 # --- BLOOMBERG TERMINAL STYLING (CSS) ---
 st.markdown("""
@@ -116,13 +116,38 @@ ASSETS = {
     "Polygon": {"ticker": "MATIC-USD", "opt_ticker": None, "news_query": "Polygon MATIC", "cg_id": "matic-network"},
 }
 
+# ENHANCED COT MAPPING (Matched to new logic)
 COT_MAPPING = {
-    "Gold (Comex)": {"name": "GOLD - COMMODITY EXCHANGE INC."},
-    "S&P 500": {"name": "E-MINI S&P 500 - CHICAGO MERCANTILE EXCHANGE"},
-    "NASDAQ": {"name": "NASDAQ-100 CONSOLIDATED - CHICAGO MERCANTILE EXCHANGE"},
-    "EUR/USD": {"name": "EURO FX - CHICAGO MERCANTILE EXCHANGE"},
-    "Bitcoin": {"name": "BITCOIN - CHICAGO MERCANTILE EXCHANGE"},
-    "Ethereum": {"name": "ETHER - CHICAGO MERCANTILE EXCHANGE"}
+    "Gold (Comex)": {
+        "keywords": ["GOLD", "COMMODITY EXCHANGE"], 
+        "report_type": "disaggregated_fut", 
+        "labels": ("Managed Money", "Producers/Merchants")
+    },
+    "S&P 500": {
+        "keywords": ["E-MINI S&P 500", "CHICAGO MERCANTILE EXCHANGE"], 
+        "report_type": "traders_in_financial_futures_fut", 
+        "labels": ("Leveraged Funds", "Asset Managers")
+    },
+    "NASDAQ": {
+        "keywords": ["E-MINI NASDAQ-100", "CHICAGO MERCANTILE EXCHANGE"], 
+        "report_type": "traders_in_financial_futures_fut", 
+        "labels": ("Leveraged Funds", "Asset Managers")
+    },
+    "EUR/USD": {
+        "keywords": ["EURO FX", "CHICAGO MERCANTILE EXCHANGE"], 
+        "report_type": "traders_in_financial_futures_fut", 
+        "labels": ("Leveraged Funds", "Asset Managers")
+    },
+    "Bitcoin": {
+        "keywords": ["BITCOIN", "CHICAGO MERCANTILE EXCHANGE"], 
+        "report_type": "traders_in_financial_futures_fut", 
+        "labels": ("Leveraged Funds", "Asset Managers")
+    },
+    "Ethereum": {
+        "keywords": ["ETHER", "CHICAGO MERCANTILE EXCHANGE"], 
+        "report_type": "traders_in_financial_futures_fut", 
+        "labels": ("Leveraged Funds", "Asset Managers")
+    }
 }
 
 # --- HELPER FUNCTIONS ---
@@ -705,68 +730,117 @@ def get_correlations(base_ticker, api_key):
         return corrs.drop('Base') 
     except: return pd.Series()
 
-# --- COT DATA (UPDATED: WITH HISTORY & CHARTING) ---
-@st.cache_data(ttl=86400)
-def get_cot_data(asset_name):
-    if asset_name not in COT_MAPPING: return None
-    contract_name = COT_MAPPING[asset_name]["name"]
-    
-    # 1. Fetch Data (Library or Direct)
-    df = pd.DataFrame()
-    if HAS_COT_LIB:
-        try:
-            year = datetime.now().year
-            df = pd.DataFrame(cot.cot_year(year, cot_report_type='legacy_fut'))
-            if df.empty or len(df) < 5:
-                df = pd.DataFrame(cot.cot_year(year - 1, cot_report_type='legacy_fut'))
-        except: pass
-    
-    if df.empty:
-        try:
-            year = datetime.now().year
-            url = f"https://www.cftc.gov/files/dea/history/deahistfo{year}.zip"
-            r = requests.get(url)
-            if r.status_code != 200:
-                year -= 1
-                url = f"https://www.cftc.gov/files/dea/history/deahistfo{year}.zip"
-                r = requests.get(url)
-            
-            if r.status_code == 200:
-                with zipfile.ZipFile(io.BytesIO(r.content)) as z:
-                    filename = z.namelist()[0]
-                    with z.open(filename) as f:
-                        df = pd.read_csv(f, low_memory=False)
-        except: pass
+# --- NEW: COT QUANT ENGINE ---
+def clean_headers(df):
+    if isinstance(df.columns[0], int):
+        for i in range(20):
+            row_str = " ".join(df.iloc[i].astype(str).tolist()).lower()
+            if "market" in row_str and ("long" in row_str or "positions" in row_str):
+                df.columns = df.iloc[i]
+                return df.iloc[i+1:].reset_index(drop=True)
+    return df
 
-    if df.empty: return None
-
-    try:
-        # Filter by Contract
-        asset_df = df[df['Market_and_Exchange_Names'].str.strip() == contract_name].copy()
-        if asset_df.empty: return None
-        
-        asset_df['Date'] = pd.to_datetime(asset_df['As_of_Date_In_Form_YYMMDD'], format='%y%m%d')
-        
-        # Calculate Net Positions for History
-        asset_df['Comm_Net'] = asset_df['Comm_Positions_Long_All'] - asset_df['Comm_Positions_Short_All']
-        asset_df['Spec_Net'] = asset_df['NonComm_Positions_Long_All'] - asset_df['NonComm_Positions_Short_All']
-        
-        # Get History (Last 6 months approx 26 weeks)
-        history = asset_df.sort_values('Date').tail(26)
-        latest = history.iloc[-1]
-        
-        sentiment = "BULLISH" if latest['Comm_Net'] > 0 else "BEARISH"
-        if asset_name in ["S&P 500", "NASDAQ", "Bitcoin"]: sentiment = "HEDGED (See Specs)"
-        
-        return {
-            "date": latest['Date'].strftime('%Y-%m-%d'),
-            "comm_net": latest['Comm_Net'],
-            "spec_net": latest['Spec_Net'],
-            "sentiment": sentiment,
-            "history": history[['Date', 'Comm_Net', 'Spec_Net']]
-        }
-    except Exception as e:
+def map_columns(df, report_type):
+    col_map = {}
+    def get_col(keywords, exclude=None):
+        for col in df.columns:
+            c_str = str(col).lower()
+            if all(k in c_str for k in keywords):
+                if exclude and any(x in c_str for x in exclude): continue
+                return col
         return None
+
+    col_map['date'] = get_col(['report', 'date']) or get_col(['as', 'of', 'date']) or get_col(['date'])
+    col_map['market'] = get_col(['market'])
+
+    if "disaggregated" in report_type:
+        col_map['spec_long'] = get_col(['money', 'long'], exclude=['lev'])
+        col_map['spec_short'] = get_col(['money', 'short'], exclude=['lev'])
+        col_map['hedge_long'] = get_col(['prod', 'merc', 'long'])
+        col_map['hedge_short'] = get_col(['prod', 'merc', 'short'])
+        
+    elif "financial" in report_type:
+        col_map['spec_long'] = get_col(['lev', 'money', 'long'])
+        col_map['spec_short'] = get_col(['lev', 'money', 'short'])
+        col_map['hedge_long'] = get_col(['asset', 'mgr', 'long'])
+        col_map['hedge_short'] = get_col(['asset', 'mgr', 'short'])
+
+    final_map = {v: k for k, v in col_map.items() if v}
+    df = df.rename(columns=final_map)
+    
+    for c in ['spec_long', 'spec_short', 'hedge_long', 'hedge_short']:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
+            
+    return df
+
+@st.cache_data(ttl=86400)
+def fetch_cot_history(asset_name, start_year=2024):
+    if asset_name not in COT_MAPPING: return None
+    config = COT_MAPPING[asset_name]
+    keywords = config['keywords']
+    report_type = config['report_type']
+    
+    master_df = pd.DataFrame()
+    current_year = datetime.now().year
+    
+    for y in range(start_year, current_year + 1):
+        df_year = None
+        if HAS_COT_LIB:
+            try: df_year = cot.cot_year(year=y, cot_report_type=report_type)
+            except: pass
+        
+        # Fallback Direct
+        if df_year is None or df_year.empty:
+            try:
+                url = f"https://www.cftc.gov/files/dea/history/deahistfo{y}.zip" # Default to Future Only
+                r = requests.get(url)
+                if r.status_code == 200:
+                    with zipfile.ZipFile(io.BytesIO(r.content)) as z:
+                        filename = z.namelist()[0]
+                        with z.open(filename) as f:
+                            df_year = pd.read_csv(f, low_memory=False)
+            except: pass
+            
+        if df_year is not None and not df_year.empty:
+            df_year = clean_headers(df_year)
+            df_year = map_columns(df_year, report_type)
+            master_df = pd.concat([master_df, df_year])
+            
+    if master_df.empty: return None
+    
+    # Filter
+    if 'market' not in master_df.columns: return None
+    mask = master_df['market'].astype(str).apply(lambda x: all(k.lower() in x.lower() for k in keywords))
+    df_asset = master_df[mask].copy()
+    
+    if 'date' in df_asset.columns:
+        df_asset['date'] = pd.to_datetime(df_asset['date'], errors='coerce')
+        df_asset = df_asset.sort_values('date')
+        
+    return df_asset
+
+# --- QUANT HELPERS ---
+def calculate_z_score(series, window=52):
+    roll_mean = series.rolling(window=window).mean()
+    roll_std = series.rolling(window=window).std()
+    return (series - roll_mean) / roll_std
+
+def get_percentile(series, current_value):
+    return (series < current_value).mean() * 100
+
+def generate_cot_analysis(spec_net, hedge_net, spec_label, hedge_label):
+    spec_sent = "🟢 BULLISH" if spec_net > 0 else "🔴 BEARISH"
+    hedge_sent = "🟢 BULLISH" if hedge_net > 0 else "🔴 BEARISH"
+    if (spec_net > 0 and hedge_net < 0) or (spec_net < 0 and hedge_net > 0):
+        structure = "✅ **Healthy Structure:** Speculators and Hedgers are on opposite sides (Risk Transfer active)."
+    else:
+        structure = "⚠️ **Anomaly:** Both groups are positioned in the same direction. Watch for liquidity gaps."
+    return f"""
+    * **{spec_label}:** {spec_sent} (Net: {int(spec_net):,})
+    * **{hedge_label}:** {hedge_sent} (Net: {int(hedge_net):,})
+    {structure}
+    """
 
 # --- DATA FETCHERS ---
 @st.cache_data(ttl=300)
@@ -835,7 +909,7 @@ with st.sidebar:
         st.rerun()
 
 # --- MAIN DASHBOARD ---
-st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V5.16</span></h1>", unsafe_allow_html=True)
+st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V5.17</span></h1>", unsafe_allow_html=True)
 
 # Fetch Data
 daily_data = get_daily_data(asset_info['ticker'])
@@ -854,7 +928,7 @@ gex_df, gex_date, gex_spot, current_iv = get_gex_profile(asset_info['opt_ticker'
 vol_profile, poc_price = calculate_volume_profile(intraday_data)
 hurst = calculate_hurst(daily_data['Close'].values) if not daily_data.empty else 0.5
 regime_data = get_market_regime(asset_info['ticker'])
-cot_data = get_cot_data(selected_asset)
+# OLD COT FETCH REMOVED -> REPLACED BY SECTION 8 LOGIC
 tech_radar = calculate_technical_radar(daily_data)
 correlations = get_correlations(asset_info['ticker'], fred_key)
 news_sentiment_df = calculate_news_sentiment(combined_news_for_llm)
@@ -1363,46 +1437,96 @@ if pred_dates is not None and pred_paths is not None:
     terminal_chart_layout(fig_pred, title="MONTE CARLO PROJECTION (126 Days)", height=400)
     st.plotly_chart(fig_pred, use_container_width=True)
 
-# --- 8. RESTORED: CFTC COT DISPLAY (VISUALS ADDED) ---
-if cot_data:
-    st.markdown("---")
-    st.markdown("### 🏛️ CFTC COMMITMENTS OF TRADERS")
+# --- 8. COT QUANT TERMINAL (V5.17 UPGRADE) ---
+st.markdown("---")
+st.markdown("### 🏛️ COT QUANT TERMINAL")
+
+# 1. Fetch Historical Data
+with st.spinner("Analyzing CFTC Data..."):
+    cot_history = fetch_cot_history(selected_asset, start_year=2024)
+
+if cot_history is not None and not cot_history.empty:
     
-    # 1. Metrics Top Row
-    c_cot1, c_cot2, c_cot3 = st.columns(3)
-    c_cot1.metric("Commercials (Smart Money)", f"{cot_data['comm_net']:,.0f}", help="Commercial Hedgers Net Position")
-    c_cot2.metric("Speculators (Funds)", f"{cot_data['spec_net']:,.0f}", help="Non-Commercial/Managed Money Net Position")
-    c_cot3.markdown(f"""
-    <div class='terminal-box' style='text-align:center;'>
-        <div style='font-size:0.8em; color:gray;'>SENTIMENT</div>
-        <div style='font-size:1.2em; font-weight:bold; color:white;'>{cot_data['sentiment']}</div>
-        <div style='font-size:0.7em;'>Date: {cot_data['date']}</div>
-    </div>
-    """, unsafe_allow_html=True)
+    # 2. Process Data for Metrics
+    cot_config = COT_MAPPING[selected_asset]
+    spec_label, hedge_label = cot_config['labels']
     
-    # 2. History Chart (NEW)
-    if 'history' in cot_data and not cot_data['history'].empty:
-        history = cot_data['history']
-        fig_cot = go.Figure()
+    if all(c in cot_history.columns for c in ['spec_long', 'spec_short', 'hedge_long', 'hedge_short']):
         
-        # Commercials (Smart Money) - Usually Green/Bullish
-        fig_cot.add_trace(go.Scatter(
-            x=history['Date'], y=history['Comm_Net'],
-            name='Commercials (Hedgers)',
-            line=dict(color='#00ff00', width=2)
-        ))
+        # Calculations
+        cot_history['Net Speculator'] = cot_history['spec_long'] - cot_history['spec_short']
+        cot_history['Net Hedger'] = cot_history['hedge_long'] - cot_history['hedge_short']
+        cot_history['Spec Z-Score'] = calculate_z_score(cot_history['Net Speculator'])
         
-        # Speculators (Funds) - Usually Opposite
-        fig_cot.add_trace(go.Scatter(
-            x=history['Date'], y=history['Spec_Net'],
-            name='Speculators (Funds)',
-            line=dict(color='#ff00ff', width=2, dash='dot')
-        ))
+        latest_cot = cot_history.iloc[-1]
+        prev_cot = cot_history.iloc[-2] if len(cot_history) > 1 else latest_cot
         
-        fig_cot.add_hline(y=0, line_color='gray', line_dash='dash')
+        # 3. METRICS ROW
+        c_cot1, c_cot2, c_cot3, c_cot4 = st.columns(4)
         
-        terminal_chart_layout(fig_cot, title="INSTITUTIONAL POSITIONING TREND (6 Months)", height=350)
-        st.plotly_chart(fig_cot, use_container_width=True)
+        # Speculator Net
+        spec_delta = latest_cot['Net Speculator'] - prev_cot['Net Speculator']
+        c_cot1.metric(f"{spec_label} (Net)", f"{int(latest_cot['Net Speculator']):,}", f"{int(spec_delta):,}")
+        
+        # Hedger Net
+        hedge_delta = latest_cot['Net Hedger'] - prev_cot['Net Hedger']
+        c_cot2.metric(f"{hedge_label} (Net)", f"{int(latest_cot['Net Hedger']):,}", f"{int(hedge_delta):,}", delta_color="inverse")
+        
+        # Z-Score
+        z_val = latest_cot['Spec Z-Score']
+        c_cot3.metric("Z-Score (52wk)", f"{z_val:.2f}σ", "Extreme" if abs(z_val) > 2 else "Neutral", delta_color="off")
+        
+        # Date
+        c_cot4.metric("Report Date", latest_cot['date'].strftime('%Y-%m-%d'))
+        
+        # 4. AI Interpretation Box
+        st.info(generate_cot_analysis(latest_cot['Net Speculator'], latest_cot['Net Hedger'], spec_label, hedge_label))
+        
+        # 5. VISUALIZATION TABS
+        tab_trend, tab_struct, tab_osc = st.tabs(["📈 NET TREND", "🦋 LONG/SHORT STRUCTURE", "📊 Z-SCORE OSCILLATOR"])
+        
+        with tab_trend:
+            fig_trend = go.Figure()
+            fig_trend.add_trace(go.Scatter(x=cot_history['date'], y=cot_history['Net Speculator'], name=spec_label, line=dict(color='#00FF00', width=2)))
+            fig_trend.add_trace(go.Scatter(x=cot_history['date'], y=cot_history['Net Hedger'], name=hedge_label, line=dict(color='#FF0000', width=2)))
+            fig_trend.add_hline(y=0, line_dash="dash", line_color="gray")
+            terminal_chart_layout(fig_trend, title="NET POSITIONING HISTORY (Smart Money vs Specs)", height=400)
+            st.plotly_chart(fig_trend, use_container_width=True)
+            
+        with tab_struct:
+            fig_struct = go.Figure()
+            # Speculator Longs (Green)
+            fig_struct.add_trace(go.Bar(
+                x=cot_history['date'], 
+                y=cot_history['spec_long'], 
+                name=f"{spec_label} Longs", 
+                marker_color='#00C805'
+            ))
+            # Speculator Shorts (Red) - Negative for Butterfly
+            fig_struct.add_trace(go.Bar(
+                x=cot_history['date'], 
+                y=-cot_history['spec_short'], 
+                name=f"{spec_label} Shorts", 
+                marker_color='#FF4B4B'
+            ))
+            fig_struct.update_layout(barmode='overlay')
+            terminal_chart_layout(fig_struct, title=f"{spec_label.upper()} STRUCTURE (Butterfly Chart)", height=400)
+            st.caption("Green Bars = Long Contracts. Red Bars = Short Contracts (Plotted Inversely).")
+            st.plotly_chart(fig_struct, use_container_width=True)
+            
+        with tab_osc:
+            fig_z = go.Figure()
+            colors = ['red' if val > 2 or val < -2 else 'gray' for val in cot_history['Spec Z-Score']]
+            fig_z.add_trace(go.Bar(x=cot_history['date'], y=cot_history['Spec Z-Score'], marker_color=colors, name="Z-Score"))
+            fig_z.add_hline(y=2, line_dash="dot", line_color="red", annotation_text="Overbought (+2σ)")
+            fig_z.add_hline(y=-2, line_dash="dot", line_color="red", annotation_text="Oversold (-2σ)")
+            terminal_chart_layout(fig_z, title="POSITIONING EXTREMES (Z-Score)", height=400)
+            st.plotly_chart(fig_z, use_container_width=True)
+            
+    else:
+        st.warning(f"COT Data retrieved but missing required columns for {selected_asset}. Try another asset.")
+else:
+    st.info(f"No COT Data available for {selected_asset}. This asset might not be a futures contract or mapping is missing.")
 
 # --- 9. INTELLIGENT EXECUTIVE SUMMARY & THESIS ---
 st.markdown("---")
