@@ -4,19 +4,34 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import requests
-import cot_reports as cot
 import google.generativeai as genai
 from newsapi import NewsApiClient
 from datetime import datetime, timedelta
 from scipy.stats import norm
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.mixture import GaussianMixture
-from textblob import TextBlob 
 import os
 import time
+import io
+import zipfile
+
+# --- SAFE IMPORT SYSTEM (Prevents Crashes) ---
+# 1. TextBlob (Sentiment)
+try:
+    from textblob import TextBlob
+    HAS_NLP = True
+except ImportError:
+    HAS_NLP = False
+
+# 2. COT Reports (Institutional Data)
+try:
+    import cot_reports as cot
+    HAS_COT_LIB = True
+except ImportError:
+    HAS_COT_LIB = False
 
 # --- APP CONFIGURATION ---
-st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V5.14", page_icon="💹")
+st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V5.15", page_icon="💹")
 
 # --- BLOOMBERG TERMINAL STYLING (CSS) ---
 st.markdown("""
@@ -258,10 +273,10 @@ def generate_deep_dive_thesis(ticker, price, change, regime, ml_signal, gex_data
     except Exception as e:
         return f"Thesis Generation Failed: {str(e)}"
 
-# --- NLP SENTIMENT ENGINE ---
+# --- NLP SENTIMENT ENGINE (SAFE) ---
 def calculate_news_sentiment(news_items):
     """Calculates cumulative sentiment score from news headlines."""
-    if not news_items: return pd.DataFrame()
+    if not HAS_NLP or not news_items: return pd.DataFrame()
     
     scores = []
     for news in news_items:
@@ -282,8 +297,6 @@ def calculate_news_sentiment(news_items):
     if df.empty: return pd.DataFrame()
     
     # Create cumulative sentiment "Momentum"
-    # We assume news is already sorted by date (newest first). 
-    # For cumulative chart, we need oldest first.
     df = df.iloc[::-1].reset_index(drop=True) 
     df['cumulative'] = df['score'].cumsum()
     return df
@@ -369,9 +382,6 @@ def calculate_black_scholes_gamma(S, K, T, r, sigma):
 
 @st.cache_data(ttl=3600)
 def get_gex_profile(opt_ticker):
-    """
-    Returns: GEX DataFrame, Expiry Date, Spot Price, AND Average ATM IV
-    """
     if opt_ticker is None: return None, None, None, None
     try:
         tk = yf.Ticker(opt_ticker)
@@ -384,19 +394,17 @@ def get_gex_profile(opt_ticker):
         exps = tk.options
         if not exps: return None, None, None, None
         
-        # Use next expiry for better volume
         target_exp = exps[1] if len(exps) > 1 else exps[0]
         chain = tk.option_chain(target_exp)
         calls, puts = chain.calls, chain.puts
         
         if calls.empty or puts.empty: return None, None, None, None
         
-        # Calculate ATM IV (Strike within 5% of Spot)
+        # Calculate ATM IV
         atm_mask = (calls['strike'] > spot_price * 0.95) & (calls['strike'] < spot_price * 1.05)
         atm_calls = calls[atm_mask]
         avg_iv = atm_calls['impliedVolatility'].mean() * 100 if not atm_calls.empty else 0
         
-        # GEX Calculation
         exp_date = datetime.strptime(target_exp, "%Y-%m-%d")
         days_to_exp = (exp_date - datetime.now()).days
         T = 0.001 if days_to_exp <= 0 else days_to_exp / 365.0
@@ -697,25 +705,74 @@ def get_correlations(base_ticker, api_key):
         return corrs.drop('Base') 
     except: return pd.Series()
 
+# --- COT DATA (UPDATED: ROBUST & NO DEPENDENCY REQUIRED) ---
 @st.cache_data(ttl=86400)
 def get_cot_data(asset_name):
     if asset_name not in COT_MAPPING: return None
     contract_name = COT_MAPPING[asset_name]["name"]
+    
+    # 1. Try to use the library first
+    if HAS_COT_LIB:
+        try:
+            # Use current year, fallback to previous if early in year
+            year = datetime.now().year
+            df = pd.DataFrame(cot.cot_year(year, cot_report_type='legacy_fut'))
+            if df.empty:
+                df = pd.DataFrame(cot.cot_year(year - 1, cot_report_type='legacy_fut'))
+        except:
+            df = pd.DataFrame()
+    else:
+        # 2. Fallback: Direct Fetch (No Library Needed)
+        try:
+            year = datetime.now().year
+            url = f"https://www.cftc.gov/files/dea/history/deahistfo{year}.zip"
+            r = requests.get(url)
+            if r.status_code != 200:
+                year -= 1
+                url = f"https://www.cftc.gov/files/dea/history/deahistfo{year}.zip"
+                r = requests.get(url)
+            
+            if r.status_code == 200:
+                with zipfile.ZipFile(io.BytesIO(r.content)) as z:
+                    # File inside is usually 'annual.txt' or similar
+                    filename = z.namelist()[0]
+                    with z.open(filename) as f:
+                        df = pd.read_csv(f, low_memory=False)
+            else:
+                df = pd.DataFrame()
+        except:
+            df = pd.DataFrame()
+
+    if df.empty: return None
+
     try:
-        df = pd.DataFrame(cot.cot_year(datetime.now().year, cot_report_type='legacy_fut'))
-        asset_df = df[df['Market_and_Exchange_Names'] == contract_name].copy()
-        if asset_df.empty:
-            df = pd.DataFrame(cot.cot_year(datetime.now().year - 1, cot_report_type='legacy_fut'))
-            asset_df = df[df['Market_and_Exchange_Names'] == contract_name].copy()
+        # Normalize column names (Legacy Report)
+        # Library vs Raw CSV might differ slightly, but typically match
+        # We need: 'Market_and_Exchange_Names', 'As_of_Date_In_Form_YYMMDD'
+        # 'NonComm_Positions_Long_All', 'NonComm_Positions_Short_All'
+        # 'Comm_Positions_Long_All', 'Comm_Positions_Short_All'
+        
+        # Filter by Contract
+        asset_df = df[df['Market_and_Exchange_Names'].str.strip() == contract_name].copy()
         if asset_df.empty: return None
+        
         asset_df['Date'] = pd.to_datetime(asset_df['As_of_Date_In_Form_YYMMDD'], format='%y%m%d')
         latest = asset_df.sort_values('Date').iloc[-1]
+        
         comm_net = latest['Comm_Positions_Long_All'] - latest['Comm_Positions_Short_All']
         spec_net = latest['NonComm_Positions_Long_All'] - latest['NonComm_Positions_Short_All']
+        
         sentiment = "BULLISH" if comm_net > 0 else "BEARISH"
         if asset_name in ["S&P 500", "NASDAQ", "Bitcoin"]: sentiment = "HEDGED (See Specs)"
-        return {"date": latest['Date'].strftime('%Y-%m-%d'), "comm_net": comm_net, "spec_net": spec_net, "sentiment": sentiment}
-    except: return None
+        
+        return {
+            "date": latest['Date'].strftime('%Y-%m-%d'),
+            "comm_net": comm_net,
+            "spec_net": spec_net,
+            "sentiment": sentiment
+        }
+    except Exception as e:
+        return None
 
 # --- DATA FETCHERS ---
 @st.cache_data(ttl=300)
@@ -765,6 +822,13 @@ with st.sidebar:
         st.progress(min(st.session_state['rapid_calls'] / 10, 1.0))
         st.write(f"**FRED** ({st.session_state['fred_calls']} calls)")
         st.write(f"**CoinGecko** ({st.session_state['coingecko_calls']} calls)")
+        
+        # Dependency Status
+        if not HAS_NLP:
+            st.warning("NLP Disabled: `textblob` missing")
+        if not HAS_COT_LIB:
+            st.info("Using Direct COT Fetch (No Lib)")
+            
     st.markdown("---")
     rapid_key = get_api_key("rapidapi_key")
     news_key = get_api_key("news_api_key")
@@ -777,7 +841,7 @@ with st.sidebar:
         st.rerun()
 
 # --- MAIN DASHBOARD ---
-st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V5.14</span></h1>", unsafe_allow_html=True)
+st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V5.15</span></h1>", unsafe_allow_html=True)
 
 # Fetch Data
 daily_data = get_daily_data(asset_info['ticker'])
@@ -1029,8 +1093,7 @@ with col_news:
     # --- NEW: SENTIMENT CHART ---
     st.markdown(f"### 📰 {asset_info.get('news_query', 'LATEST')} WIRE & SENTIMENT")
     
-    # Render Sentiment Chart FIRST if available
-    if not news_sentiment_df.empty:
+    if HAS_NLP and not news_sentiment_df.empty:
          fig_sent = go.Figure()
          fig_sent.add_trace(go.Scatter(
              x=news_sentiment_df.index, 
@@ -1049,6 +1112,8 @@ with col_news:
              yaxis=dict(showgrid=True, gridcolor="#333")
          )
          st.plotly_chart(fig_sent, use_container_width=True)
+    elif not HAS_NLP:
+        st.warning("Install `textblob` to enable Sentiment Analysis.")
     
     tab_gen, tab_ff = st.tabs(["📰 GENERAL", "⚡ FOREX FACTORY"])
     def render_news(items):
