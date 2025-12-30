@@ -48,8 +48,7 @@ st.markdown("""
     
     /* Metric Styling */
     div[data-testid="stMetricValue"] { 
-        color: #00e6ff !important; 
-        font-family: 'Courier New', monospace;
+        color: #00e6ff !important; font-family: 'Courier New', monospace;
         font-weight: bold;
     }
     div[data-testid="stMetricLabel"] { color: #ff9900 !important; font-size: 0.8rem; }
@@ -59,8 +58,7 @@ st.markdown("""
     
     /* Custom Boxes */
     .terminal-box { 
-        border: 1px solid #333; 
-        background-color: #0a0a0a; 
+        border: 1px solid #333; background-color: #0a0a0a; 
         padding: 15px; 
         margin-bottom: 10px;
     }
@@ -228,7 +226,7 @@ def get_coingecko_stats(cg_id, api_key):
         return None
     except Exception: return None
 
-# --- LLM ENGINE ---
+# --- LLM ENGINE (DYNAMIC MODEL FINDER - FIXED) ---
 def get_technical_narrative(ticker, price, daily_pct, regime, ml_signal, gex_data, cot_data, levels, macro_data, api_key):
     if not api_key: return "AI Analyst unavailable (No Key)."
     st.session_state['gemini_calls'] += 1
@@ -247,7 +245,6 @@ def get_technical_narrative(ticker, price, daily_pct, regime, ml_signal, gex_dat
         
     prompt = f"""
     You are a Senior Portfolio Manager. Analyze data for {ticker} and write a 3-bullet executive summary.
-    
     DATA: Price: {price:,.2f} ({daily_pct:.2f}%), Regime: {regime['regime'] if regime else 'Unknown'}, 
     ML: {ml_signal}, GEX: {gex_text}, COT: {cot_data['sentiment'] if cot_data else 'N/A'}, Levels: {lvl_text}
     MACRO CONTEXT: {macro_str}
@@ -259,7 +256,22 @@ def get_technical_narrative(ticker, price, daily_pct, regime, ml_signal, gex_dat
     """
     try:
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel("gemini-1.5-flash")
+        
+        # --- AUTO-DISCOVER MODELS (V4.7 Logic) ---
+        available_models = []
+        for m in genai.list_models():
+            if 'generateContent' in m.supported_generation_methods:
+                available_models.append(m)
+        
+        if not available_models:
+            return "Error: No valid models found. Check API Key permissions."
+            
+        # Prefer 'flash' -> 'pro' -> others
+        available_models.sort(key=lambda x: 'flash' not in x.name)
+        chosen_model_name = available_models[0].name
+        # ----------------------------------------
+        
+        model = genai.GenerativeModel(chosen_model_name)
         response = model.generate_content(prompt)
         return response.text
     except Exception as e:
@@ -292,7 +304,21 @@ def generate_deep_dive_thesis(ticker, price, change, regime, ml_signal, gex_data
     """
     try:
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel("gemini-1.5-flash")
+        
+        # --- AUTO-DISCOVER MODELS (V4.7 Logic) ---
+        available_models = []
+        for m in genai.list_models():
+            if 'generateContent' in m.supported_generation_methods:
+                available_models.append(m)
+        
+        if not available_models:
+            return "Error: No valid models found."
+            
+        available_models.sort(key=lambda x: 'flash' not in x.name)
+        chosen_model_name = available_models[0].name
+        # ----------------------------------------
+        
+        model = genai.GenerativeModel(chosen_model_name)
         response = model.generate_content(prompt)
         return response.text
     except Exception as e:
