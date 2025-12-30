@@ -15,7 +15,7 @@ import os
 import time
 
 # --- APP CONFIGURATION ---
-st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V5.11", page_icon="💹")
+st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V5.12", page_icon="💹")
 
 # --- BLOOMBERG TERMINAL STYLING (CSS) ---
 st.markdown("""
@@ -72,7 +72,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- SESSION STATE INITIALIZATION (For API Tracking) ---
+# --- SESSION STATE INITIALIZATION ---
 if 'gemini_calls' not in st.session_state: st.session_state['gemini_calls'] = 0
 if 'news_calls' not in st.session_state: st.session_state['news_calls'] = 0
 if 'rapid_calls' not in st.session_state: st.session_state['rapid_calls'] = 0
@@ -83,21 +83,16 @@ if 'thesis_cache' not in st.session_state: st.session_state['thesis_cache'] = No
 
 # --- CONSTANTS & MAPPINGS ---
 ASSETS = {
-    # --- MAJOR FOREX/INDICES ---
     "Gold (Comex)": {"ticker": "GC=F", "opt_ticker": "GLD", "news_query": "Gold Price", "cg_id": None},
     "S&P 500": {"ticker": "^GSPC", "opt_ticker": "SPY", "news_query": "S&P 500", "cg_id": None},
     "NASDAQ": {"ticker": "^IXIC", "opt_ticker": "QQQ", "news_query": "Nasdaq", "cg_id": None},
     "EUR/USD": {"ticker": "EURUSD=X", "opt_ticker": None, "news_query": "EURUSD", "cg_id": None},
-    
-    # --- CRYPTO L1s ---
     "Bitcoin": {"ticker": "BTC-USD", "opt_ticker": "BITO", "news_query": "Bitcoin", "cg_id": "bitcoin"},
     "Ethereum": {"ticker": "ETH-USD", "opt_ticker": "ETHE", "news_query": "Ethereum", "cg_id": "ethereum"},
     "Solana": {"ticker": "SOL-USD", "opt_ticker": None, "news_query": "Solana Crypto", "cg_id": "solana"},
     "XRP": {"ticker": "XRP-USD", "opt_ticker": None, "news_query": "Ripple XRP", "cg_id": "ripple"},
     "BNB": {"ticker": "BNB-USD", "opt_ticker": None, "news_query": "Binance Coin", "cg_id": "binancecoin"},
     "Cardano": {"ticker": "ADA-USD", "opt_ticker": None, "news_query": "Cardano ADA", "cg_id": "cardano"},
-    
-    # --- MEME COINS & ALTCOINS ---
     "Dogecoin": {"ticker": "DOGE-USD", "opt_ticker": None, "news_query": "Dogecoin", "cg_id": "dogecoin"},
     "Shiba Inu": {"ticker": "SHIB-USD", "opt_ticker": None, "news_query": "Shiba Inu Coin", "cg_id": "shiba-inu"},
     "Pepe": {"ticker": "PEPE-USD", "opt_ticker": None, "news_query": "Pepe Coin", "cg_id": "pepe"},
@@ -105,7 +100,6 @@ ASSETS = {
     "Polygon": {"ticker": "MATIC-USD", "opt_ticker": None, "news_query": "Polygon MATIC", "cg_id": "matic-network"},
 }
 
-# Mapping for cot_reports library (Legacy Futures Names)
 COT_MAPPING = {
     "Gold (Comex)": {"name": "GOLD - COMMODITY EXCHANGE INC."},
     "S&P 500": {"name": "E-MINI S&P 500 - CHICAGO MERCANTILE EXCHANGE"},
@@ -117,21 +111,14 @@ COT_MAPPING = {
 
 # --- HELPER FUNCTIONS ---
 def get_api_key(key_name):
-    # 1. Check Streamlit Secrets (Nested & Root)
     if "api_keys" in st.secrets and key_name in st.secrets["api_keys"]:
         return st.secrets["api_keys"][key_name]
     if key_name in st.secrets:
         return st.secrets[key_name]
-    
-    # 2. Check for common aliases
     if key_name == "gemini_api_key":
         if "GOOGLE_API_KEY" in st.secrets: return st.secrets["GOOGLE_API_KEY"]
-        if "google_api_key" in st.secrets: return st.secrets["google_api_key"]
-            
-    # 3. Check OS Environment (Local dev fallback)
     if key_name in os.environ:
         return os.environ[key_name]
-        
     return None
 
 def flatten_dataframe(df):
@@ -142,43 +129,27 @@ def flatten_dataframe(df):
     df = df.loc[:, ~df.columns.duplicated()]
     return df
 
-# --- SAFE YFINANCE WRAPPER (RATE LIMIT PROTECTION) ---
 def safe_yf_download(tickers, period, interval, retries=3):
-    """
-    Wraps yf.download with auto-retry and exponential backoff 
-    to prevent 'Too Many Requests' errors.
-    """
     for i in range(retries):
         try:
-            # We add a small delay to be kind to the API
             time.sleep(0.1) 
             df = yf.download(tickers, period=period, interval=interval, progress=False)
             if not df.empty:
                 return flatten_dataframe(df)
         except Exception as e:
-            if i == retries - 1: # Last try
-                print(f"Failed to fetch {tickers}: {e}")
-                return pd.DataFrame()
-            time.sleep(2 ** i) # Exponential backoff: 1s, 2s, 4s...
+            if i == retries - 1: return pd.DataFrame()
+            time.sleep(2 ** i)
     return pd.DataFrame()
 
-# --- FRED API ENGINE (ZERO DEPENDENCY) ---
-@st.cache_data(ttl=86400) # Cache for 24 hours
+# --- FRED API ENGINE ---
+@st.cache_data(ttl=86400)
 def get_fred_series(series_id, api_key, observation_start=None):
     if not api_key: return pd.DataFrame()
     st.session_state['fred_calls'] += 1
     base_url = "https://api.stlouisfed.org/fred/series/observations"
-    
     if not observation_start:
-        observation_start = (datetime.now() - timedelta(days=365*10)).strftime('%Y-%m-%d') # Get 10y for ML
-
-    params = {
-        "series_id": series_id,
-        "api_key": api_key,
-        "file_type": "json",
-        "observation_start": observation_start
-    }
-    
+        observation_start = (datetime.now() - timedelta(days=365*10)).strftime('%Y-%m-%d')
+    params = {"series_id": series_id, "api_key": api_key, "file_type": "json", "observation_start": observation_start}
     try:
         response = requests.get(base_url, params=params)
         data = response.json()
@@ -187,8 +158,7 @@ def get_fred_series(series_id, api_key, observation_start=None):
             df['date'] = pd.to_datetime(df['date'])
             df['value'] = pd.to_numeric(df['value'], errors='coerce')
             return df[['date', 'value']].set_index('date').dropna()
-    except Exception as e:
-        return pd.DataFrame()
+    except: return pd.DataFrame()
     return pd.DataFrame()
 
 # --- COINGECKO API ENGINE ---
@@ -217,52 +187,43 @@ def get_coingecko_stats(cg_id, api_key):
         return None
     except Exception: return None
 
-# --- LLM ENGINE (UPDATED TO RECEIVE MACRO DATA) ---
+# --- LLM ENGINE ---
 def get_technical_narrative(ticker, price, daily_pct, regime, ml_signal, gex_data, cot_data, levels, macro_data, api_key):
-    """
-    Standard View: 3 Bullet Executive Summary.
-    """
     if not api_key: return "AI Analyst unavailable (No Key)."
     st.session_state['gemini_calls'] += 1
     
-    # Format data
     gex_text = "N/A"
     if gex_data is not None:
         total_gex = gex_data['gex'].sum()
         gex_text = f"Net Gamma: ${total_gex/1_000_000:.1f}M ({'Long/Sticky' if total_gex>0 else 'Short/Volatile'})"
-
     lvl_text = "N/A"
     if levels:
         lvl_text = f"Pivot: {levels['Pivot']:.2f}, R1: {levels['R1']:.2f}, S1: {levels['S1']:.2f}"
-
-    # Format Macro Data string
+    
     macro_str = "N/A"
     if macro_data:
         macro_str = f"YieldCurve: {macro_data.get('yield_curve', 'N/A')}, Inflation(CPI): {macro_data.get('cpi', 'N/A')}%, Rates: {macro_data.get('rates', 'N/A')}%, MacroRegime: {macro_data.get('regime', 'N/A')}"
-
+        
     prompt = f"""
     You are a Senior Portfolio Manager. Analyze data for {ticker} and write a 3-bullet executive summary.
     
     DATA: Price: {price:,.2f} ({daily_pct:.2f}%), Regime: {regime['regime'] if regime else 'Unknown'}, 
     ML: {ml_signal}, GEX: {gex_text}, COT: {cot_data['sentiment'] if cot_data else 'N/A'}, Levels: {lvl_text}
     MACRO CONTEXT: {macro_str}
-
     TASK:
     1. Synthesize Technicals + Macro.
     2. Identify key trigger level.
     3. Final Execution bias ("Buy Dips", "Fade", etc).
     Keep it concise. Bloomberg Terminal style.
     """
-
     try:
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel("gemini-1.5-flash")
         response = model.generate_content(prompt)
         return response.text
     except Exception as e:
-        error_msg = str(e)
-        if "429" in error_msg: return "⚠️ API LIMIT REACHED."
-        return f"AI Analyst unavailable: {error_msg}"
+        if "429" in str(e): return "⚠️ API LIMIT REACHED."
+        return f"AI Analyst unavailable: {str(e)}"
 
 def generate_deep_dive_thesis(ticker, price, change, regime, ml_signal, gex_data, cot_data, levels, news_summary, macro_data, api_key):
     if not api_key: return "API Key Missing."
@@ -272,26 +233,22 @@ def generate_deep_dive_thesis(ticker, price, change, regime, ml_signal, gex_data
     if gex_data is not None:
         total_gex = gex_data['gex'].sum()
         gex_text = f"Net Gamma: ${total_gex/1_000_000:.1f}M"
-
     macro_str = "N/A"
     if macro_data:
-        macro_str = f"YieldCurve (10y-2y): {macro_data.get('yield_curve', 'N/A')}, CPI YoY: {macro_data.get('cpi', 'N/A')}%, Fed Funds Rate: {macro_data.get('rates', 'N/A')}%, Macro Regime: {macro_data.get('regime', 'N/A')}"
-
+        macro_str = f"YieldCurve: {macro_data.get('yield_curve', 'N/A')}, CPI: {macro_data.get('cpi', 'N/A')}%, Rates: {macro_data.get('rates', 'N/A')}%, Regime: {macro_data.get('regime', 'N/A')}"
+    
     prompt = f"""
     Write a detailed Investment Thesis for {ticker}.
-    
     DATA: Price: {price:,.2f} ({change:.2f}%), Regime: {regime['regime'] if regime else 'Unknown'}, 
     ML: {ml_signal}, GEX: {gex_text}, COT: {cot_data['sentiment'] if cot_data else 'N/A'}
     MACRO: {macro_str}
     NEWS: {news_summary}
-
     OUTPUT FORMAT (Markdown):
-    ### 1. THE MACRO & TECHNICAL CROSSROADS (Combine Fed Policy with Charts)
+    ### 1. THE MACRO & TECHNICAL CROSSROADS
     ### 2. CORE ARGUMENT (Long/Short/Neutral)
     ### 3. THE BEAR/BULL CASE (Risks)
     ### 4. KEY LEVELS (Invalidation)
     """
-    
     try:
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel("gemini-1.5-flash")
@@ -300,7 +257,7 @@ def generate_deep_dive_thesis(ticker, price, change, regime, ml_signal, gex_data
     except Exception as e:
         return f"Thesis Generation Failed: {str(e)}"
 
-# --- 1. QUANT ENGINE (GMM + HURST) ---
+# --- QUANT ENGINES ---
 def calculate_hurst(series, lags=range(2, 20)):
     try:
         tau = [np.sqrt(np.std(np.subtract(series[lag:], series[:-lag]))) for lag in lags]
@@ -330,43 +287,28 @@ def get_market_regime(ticker):
         return {"regime": regime_desc, "color": color, "confidence": max(probs)}
     except: return None
 
-# --- NEW: MACRO ML REGIME ENGINE (FRED) ---
 @st.cache_data(ttl=86400)
 def get_macro_ml_regime(cpi_df, rate_df):
-    """
-    Uses GMM to classify Economic Regime based on Inflation (CPI) and Rates (Fed Funds).
-    """
     if cpi_df.empty or rate_df.empty: return None
     try:
-        # Merge data on index (Month end)
         df = pd.merge(cpi_df, rate_df, left_index=True, right_index=True, how='inner')
         df.columns = ['CPI', 'Rates']
         df['CPI_YoY'] = df['CPI'].pct_change(12) * 100
         df = df.dropna()
-        
-        # Prepare Features
         X = df[['CPI_YoY', 'Rates']].values
         if len(X) < 12: return None
-        
         gmm = GaussianMixture(n_components=4, random_state=42)
         gmm.fit(X)
-        
-        current_state = gmm.predict(X[[-1]])[0]
-        
-        # Heuristic Naming based on centroids
         curr_cpi = df['CPI_YoY'].iloc[-1]
         curr_rate = df['Rates'].iloc[-1]
-        
         regime_name = "Neutral"
         if curr_cpi > 4 and curr_rate < curr_cpi: regime_name = "INFLATIONARY (Neg Real Rates)"
         elif curr_cpi > 4 and curr_rate > curr_cpi: regime_name = "TIGHTENING (Pos Real Rates)"
         elif curr_cpi < 2: regime_name = "DEFLATIONARY / RISK OFF"
         else: regime_name = "GOLDILOCKS / STABLE"
-        
         return {"regime": regime_name, "cpi": curr_cpi, "rate": curr_rate}
     except: return None
 
-# --- 2. MACHINE LEARNING ENGINE ---
 @st.cache_data(ttl=3600)
 def get_ml_prediction(ticker):
     try:
@@ -379,8 +321,7 @@ def get_ml_prediction(ticker):
         data['Mom_5d'] = data['Close'].pct_change(5)
         data = data.dropna()
         if len(data) < 50: return None, 0.5
-        features = ['Vol_5d', 'Mom_5d']
-        X = data[features]
+        X = data[['Vol_5d', 'Mom_5d']]
         y = data['Target']
         model = RandomForestClassifier(n_estimators=100, max_depth=3, random_state=42)
         model.fit(X, y)
@@ -388,7 +329,7 @@ def get_ml_prediction(ticker):
         return model, prob_up
     except: return None, 0.5
 
-# --- 3. GAMMA EXPOSURE ENGINE ---
+# --- GAMMA EXPOSURE ---
 def calculate_black_scholes_gamma(S, K, T, r, sigma):
     if T <= 0 or sigma <= 0: return 0
     d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
@@ -405,19 +346,15 @@ def get_gex_profile(opt_ticker):
             spot_price = hist['Close'].iloc[-1] if not hist.empty else tk.fast_info.last_price
         except: return None, None, None
         if spot_price is None: return None, None, None
-
         exps = tk.options
         if not exps: return None, None, None
         target_exp = exps[1] if len(exps) > 1 else exps[0]
-            
         chain = tk.option_chain(target_exp)
         calls, puts = chain.calls, chain.puts
         if calls.empty or puts.empty: return None, None, None
-        
         exp_date = datetime.strptime(target_exp, "%Y-%m-%d")
         days_to_exp = (exp_date - datetime.now()).days
         T = 0.001 if days_to_exp <= 0 else days_to_exp / 365.0
-        
         gex_data = []
         strikes = sorted(list(set(calls['strike'].tolist() + puts['strike'].tolist())))
         for K in strikes:
@@ -432,12 +369,10 @@ def get_gex_profile(opt_ticker):
             p_gamma = calculate_black_scholes_gamma(spot_price, K, T, 0.045, p_iv)
             net_gex = (c_gamma * c_oi - p_gamma * p_oi) * spot_price * 100
             gex_data.append({"strike": K, "gex": net_gex})
-            
         df = pd.DataFrame(gex_data, columns=['strike', 'gex'])
         return df, target_exp, spot_price 
-    except Exception: return None, None, None
+    except: return None, None, None
 
-# --- 4. VOLUME PROFILE ENGINE ---
 def calculate_volume_profile(df, bins=50):
     if df.empty: return None, None
     price_range = df['High'].max() - df['Low'].min()
@@ -449,7 +384,6 @@ def calculate_volume_profile(df, bins=50):
     poc_idx = vol_profile['Volume'].idxmax()
     return vol_profile, vol_profile.loc[poc_idx, 'PriceLevel']
 
-# --- 5. MONTE CARLO & SEASONALITY ---
 @st.cache_data(ttl=3600)
 def get_seasonality_stats(daily_data, ticker_name):
     stats = {}
@@ -472,7 +406,7 @@ def get_seasonality_stats(daily_data, ticker_name):
                 intra['Return'] = intra['Close'].pct_change()
                 target_hours = [2,3,4,5,6, 8,9,10,11, 14,15,16,17,18, 20,21,22,23]
                 stats['hourly_perf'] = intra[intra['Hour'].isin(target_hours)].groupby('Hour')['Return'].mean() * 100
-        except Exception: stats['hourly_perf'] = None
+        except: stats['hourly_perf'] = None
         return stats
     except: return None
 
@@ -490,9 +424,8 @@ def generate_monte_carlo(stock_data, days=126, simulations=1000):
         daily_returns = np.exp(drift + stdev * np.random.normal(0, 1, (days, simulations)))
         for t in range(1, days + 1): price_paths[t] = price_paths[t - 1] * daily_returns[t - 1]
         return pd.date_range(start=close.index[-1], periods=days + 1, freq='B'), price_paths
-    except Exception: return None, None
+    except: return None, None
 
-# --- NEW: TECHNICAL RADAR ENGINE (ZERO-DEPENDENCY) ---
 def calculate_technical_radar(df):
     if df.empty or len(df) < 30: return None
     data = df.copy()
@@ -527,7 +460,7 @@ def calculate_technical_radar(df):
     else: signals['Trend'] = {"val": "Chop", "bias": "WEAK/MIXED", "col": "neutral"}
     return signals
 
-# --- 6. NEWS & ECONOMICS ---
+# --- NEWS & ECO ---
 def parse_eco_value(val_str):
     if not isinstance(val_str, str) or val_str == '': return None
     clean = val_str.replace('%', '').replace(',', '')
@@ -622,7 +555,7 @@ def get_economic_calendar(api_key):
     except: pass 
     return []
 
-# --- 7. INSTITUTIONAL FEATURES ---
+# --- TRADING LOGIC ---
 @st.cache_data(ttl=300)
 def run_strategy_backtest(ticker):
     try:
@@ -686,68 +619,37 @@ def get_key_levels(daily_df):
     except: return {}
     high, low, close = last_complete_day['High'], last_complete_day['Low'], last_complete_day['Close']
     pivot = (high + low + close) / 3
-    return {"PDH": high, "PDL": low, "PDC": close, "Pivot": pivot, "R1": (2 * pivot) - low, "S1": (2 * pivot) - high}
+    return {
+        "PDH": high, "PDL": low, "PDC": close, "Pivot": pivot, 
+        "R1": (2 * pivot) - low, "S1": (2 * pivot) - high
+    }
 
 @st.cache_data(ttl=3600)
-def get_correlations(base_ticker, api_key): # UPDATED: Accepts API Key
+def get_correlations(base_ticker, api_key):
     try:
-        # 1. Fetch YF Data (Base, VIX, Yield, Gold)
-        tickers = {
-            "Base": base_ticker,
-            "VIX": "^VIX",
-            "10Y Yield": "^TNX",
-            "Gold": "GC=F"
-        }
+        tickers = {"Base": base_ticker, "VIX": "^VIX", "10Y Yield": "^TNX", "Gold": "GC=F"}
         yf_data = safe_yf_download(list(tickers.values()), period="6mo", interval="1d")
-        
-        # 2. Fetch FRED Data (DXY Proxy)
-        # DTWEXAFEGS: Trade Weighted U.S. Dollar Index: Advanced Foreign Economies
-        # This tracks EUR, JPY, GBP, etc. closely matching the standard DXY.
         fred_data = get_fred_series("DTWEXAFEGS", api_key) 
-        
         if yf_data.empty: return pd.Series()
         
-        # Cleanup YF
-        # yf_data usually has 'Close' as a level if multi-ticker
-        if isinstance(yf_data.columns, pd.MultiIndex):
-            yf_df = yf_data['Close'].copy()
-        elif 'Close' in yf_data.columns:
-            yf_df = yf_data['Close'].copy()
-        else:
-            yf_df = yf_data.copy()
+        if isinstance(yf_data.columns, pd.MultiIndex): yf_df = yf_data['Close'].copy()
+        elif 'Close' in yf_data.columns: yf_df = yf_data['Close'].copy()
+        else: yf_df = yf_data.copy()
             
-        # Check if single ticker (Series) or DataFrame
-        if isinstance(yf_df, pd.Series):
-             yf_df = yf_df.to_frame(name=list(tickers.keys())[0])
-
-        # Rename columns safely
-        # Note: safe_yf_download might return columns as tickers. 
-        # We need to map them back.
-        # This is a bit tricky with auto-download. simpler to just rely on column names matching values.
-        # But let's try a safe rename if columns match
+        if isinstance(yf_df, pd.Series): yf_df = yf_df.to_frame(name=list(tickers.keys())[0])
         found_cols = {c: k for k, v in tickers.items() if v in yf_df.columns}
         yf_df.rename(columns=found_cols, inplace=True)
         
-        # Cleanup FRED
         combined = yf_df
         if not fred_data.empty:
             fred_data = fred_data.rename(columns={'value': 'Dollar'})
-            # Merge: FRED is daily index, YF is daily index. 
-            # FRED index is naive datetime, YF is often TZ-aware.
-            # Normalize to naive for merge.
-            if yf_df.index.tz is not None:
-                yf_df.index = yf_df.index.tz_localize(None)
-            
+            if yf_df.index.tz is not None: yf_df.index = yf_df.index.tz_localize(None)
             combined = pd.concat([yf_df, fred_data], axis=1).dropna()
             
         if combined.empty or 'Base' not in combined.columns: return pd.Series()
-
-        # Correlation Calculation
         corrs = combined.pct_change().rolling(20).corr(combined['Base'].pct_change()).iloc[-1]
         return corrs.drop('Base') 
-    except Exception as e:
-        print(f"Corr Error: {e}")
-        return pd.Series()
+    except: return pd.Series()
 
 @st.cache_data(ttl=86400)
 def get_cot_data(asset_name):
@@ -769,7 +671,7 @@ def get_cot_data(asset_name):
         return {"date": latest['Date'].strftime('%Y-%m-%d'), "comm_net": comm_net, "spec_net": spec_net, "sentiment": sentiment}
     except: return None
 
-# --- 8. DATA FETCHERS ---
+# --- DATA FETCHERS ---
 @st.cache_data(ttl=300)
 def get_daily_data(ticker):
     try: return safe_yf_download(ticker, period="10y", interval="1d")
@@ -802,7 +704,6 @@ with st.sidebar:
     
     st.markdown("---")
     
-    # --- API QUOTA MONITOR ---
     with st.expander("📡 API QUOTA MONITOR", expanded=True):
         st.markdown("<div style='font-size:0.7em; color:gray;'>Session Usage vs Hard Limits</div>", unsafe_allow_html=True)
         st.write(f"**NewsAPI** ({st.session_state['news_calls']} / 100)")
@@ -812,7 +713,7 @@ with st.sidebar:
         st.write(f"**RapidAPI** ({st.session_state['rapid_calls']} / 10)")
         st.progress(min(st.session_state['rapid_calls'] / 10, 1.0))
         st.write(f"**FRED** ({st.session_state['fred_calls']} calls)")
-
+        st.write(f"**CoinGecko** ({st.session_state['coingecko_calls']} calls)")
     st.markdown("---")
     rapid_key = get_api_key("rapidapi_key")
     news_key = get_api_key("news_api_key")
@@ -825,7 +726,7 @@ with st.sidebar:
         st.rerun()
 
 # --- MAIN DASHBOARD ---
-st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V5.11</span></h1>", unsafe_allow_html=True)
+st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V5.12</span></h1>", unsafe_allow_html=True)
 
 # Fetch Data
 daily_data = get_daily_data(asset_info['ticker'])
@@ -843,9 +744,9 @@ gex_df, gex_date, gex_spot = get_gex_profile(asset_info['opt_ticker'])
 vol_profile, poc_price = calculate_volume_profile(intraday_data)
 hurst = calculate_hurst(daily_data['Close'].values) if not daily_data.empty else 0.5
 regime_data = get_market_regime(asset_info['ticker'])
-cot_data = get_cot_data(selected_asset) # Fetch COT Data
-tech_radar = calculate_technical_radar(daily_data) # Calculate Tech Radar
-correlations = get_correlations(asset_info['ticker'], fred_key) # UPDATED CALL
+cot_data = get_cot_data(selected_asset)
+tech_radar = calculate_technical_radar(daily_data)
+correlations = get_correlations(asset_info['ticker'], fred_key)
 
 # --- 1. OVERVIEW ---
 if not daily_data.empty:
@@ -900,12 +801,75 @@ st.markdown("---")
 st.markdown("### 📡 TECHNICAL RADAR (TRIANGULATION)")
 if tech_radar:
     tr1, tr2, tr3 = st.columns(3)
+    
     with tr1:
-        st.markdown(f"""<div class='terminal-box'><div style='color:gray; font-size:0.8em;'>MOMENTUM (RSI)</div><div style='font-size:1.5em;'>{tech_radar['RSI']['val']}</div><span class='{tech_radar['RSI']['col']}'>{tech_radar['RSI']['bias']}</span></div>""", unsafe_allow_html=True)
+        st.markdown(f"""
+        <div class='terminal-box'>
+            <div style='color:gray; font-size:0.8em;'>MOMENTUM (RSI)</div>
+            <div style='font-size:1.5em;'>{tech_radar['RSI']['val']}</div>
+            <span class='{tech_radar['RSI']['col']}'>{tech_radar['RSI']['bias']}</span>
+        </div>
+        """, unsafe_allow_html=True)
+        
     with tr2:
-        st.markdown(f"""<div class='terminal-box'><div style='color:gray; font-size:0.8em;'>TREND (EMA)</div><div style='font-size:1.5em;'>{tech_radar['Trend']['val']}</div><span class='{tech_radar['Trend']['col']}'>{tech_radar['Trend']['bias']}</span></div>""", unsafe_allow_html=True)
+        st.markdown(f"""
+        <div class='terminal-box'>
+            <div style='color:gray; font-size:0.8em;'>TREND (EMA)</div>
+            <div style='font-size:1.5em;'>{tech_radar['Trend']['val']}</div>
+            <span class='{tech_radar['Trend']['col']}'>{tech_radar['Trend']['bias']}</span>
+        </div>
+        """, unsafe_allow_html=True)
     with tr3:
-        st.markdown(f"""<div class='terminal-box'><div style='color:gray; font-size:0.8em;'>MACD (MOMENTUM)</div><div style='font-size:1.5em;'>{tech_radar['MACD']['val']}</div><span class='{tech_radar['MACD']['col']}'>{tech_radar['MACD']['bias']}</span></div>""", unsafe_allow_html=True)
+        st.markdown(f"""
+        <div class='terminal-box'>
+            <div style='color:gray; font-size:0.8em;'>MACD (MOMENTUM)</div>
+            <div style='font-size:1.5em;'>{tech_radar['MACD']['val']}</div>
+            <span class='{tech_radar['MACD']['col']}'>{tech_radar['MACD']['bias']}</span>
+        </div>
+        """, unsafe_allow_html=True)
+
+# --- 1C. RESTORED: COINGECKO INTEGRATION ---
+cg_id = asset_info.get('cg_id')
+if cg_id and cg_key:
+    st.markdown("---")
+    st.markdown("### 🦎 COINGECKO FUNDAMENTALS")
+    
+    with st.spinner("Fetching CoinGecko Data..."):
+        cg_data = get_coingecko_stats(cg_id, cg_key)
+    
+    if cg_data:
+        c_cg1, c_cg2, c_cg3, c_cg4 = st.columns(4)
+        c_cg1.metric("Market Rank", f"#{cg_data['rank']}")
+        
+        ath_color = "red" if cg_data['ath_change'] < -20 else "orange"
+        c_cg2.markdown(f"""
+        <div class='terminal-box'>
+            <div style='font-size:0.8em; color:gray;'>ATH DRAWDOWN</div>
+            <div style='color:{ath_color}; font-size:1.2em;'>{cg_data['ath_change']:.2f}%</div>
+            <div style='font-size:0.7em;'>High: ${cg_data['ath']:,.0f}</div>
+        </div>
+        """, unsafe_allow_html=True)
+        sent_val = cg_data['sentiment']
+        sent_color = "#00ff00" if sent_val > 60 else "#ff3333" if sent_val < 40 else "gray"
+        c_cg3.markdown(f"""
+        <div class='terminal-box'>
+            <div style='font-size:0.8em; color:gray;'>COMMUNITY SENTIMENT</div>
+            <div style='color:{sent_color}; font-size:1.2em;'>{sent_val}% Bullish</div>
+            <progress value="{sent_val}" max="100" style="width:100%; height:5px;"></progress>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        c_cg4.markdown(f"""
+        <div class='terminal-box'>
+            <div style='font-size:0.8em; color:gray;'>ALGORITHM</div>
+            <div style='color:white; font-size:1em;'>{cg_data['hashing']}</div>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        with st.expander("Asset Description"):
+            st.write(cg_data['desc'])
+    else:
+        st.warning("CoinGecko API Limit Reached (30 calls/min). Please wait.")
 
 # --- 2. INTRADAY TACTICAL FEED ---
 st.markdown("---")
@@ -913,7 +877,6 @@ st.markdown("### 🔭 INTRADAY TACTICAL FEED")
 rs_data = get_relative_strength(asset_info['ticker'])
 key_levels = get_key_levels(daily_data)
 col_intra_1, col_intra_2 = st.columns([2, 1])
-
 with col_intra_1:
     if not rs_data.empty:
         curr_rs = rs_data['RS_Score'].iloc[-1]
@@ -925,7 +888,6 @@ with col_intra_1:
         fig_rs.add_trace(go.Scatter(x=rs_data.index, y=rs_data['RS_Score'], mode='lines', name='Alpha', line=dict(color=rs_color, width=2), fill='tozeroy'))
         terminal_chart_layout(fig_rs, title="INTRADAY ALPHA (Real-Time)", height=250)
         st.plotly_chart(fig_rs, use_container_width=True)
-
 with col_intra_2:
     st.markdown("**🔑 KEY ALGO LEVELS**")
     if key_levels:
@@ -939,12 +901,16 @@ with col_intra_2:
         levels_list = [("R1 (Resist)", key_levels['R1']), ("PDH (High)", key_levels['PDH']), ("PIVOT (Daily)", key_levels['Pivot']), ("PDL (Low)", key_levels['PDL']), ("S1 (Support)", key_levels['S1'])]
         for name, price in levels_list:
             c_code = get_lvl_color(price, cur_price)
-            st.markdown(f"""<div style="display:flex; justify-content:space-between; border-bottom:1px solid #222; padding:5px;"><span style="color:#aaa;">{name}</span><span style="color:{c_code}; font-family:monospace;">{price:,.2f}</span></div>""", unsafe_allow_html=True)
+            st.markdown(f"""
+            <div style="display:flex; justify-content:space-between; border-bottom:1px solid #222; padding:5px;">
+                <span style="color:#aaa;">{name}</span>
+                <span style="color:{c_code}; font-family:monospace;">{price:,.2f}</span>
+            </div>
+            """, unsafe_allow_html=True)
 
 # --- 3. EVENTS & NEWS & MACRO ---
 st.markdown("---")
 col_eco, col_news = st.columns([2, 1])
-
 with col_eco:
     st.markdown("### 📅 ECONOMIC EVENTS (USD)")
     if eco_events:
@@ -962,14 +928,18 @@ with col_eco:
         if not df_cal.empty: 
             st.dataframe(df_cal.style.map(color_bias, subset=['BIAS']), use_container_width=True, hide_index=True)
     else: st.info("NO HIGH IMPACT USD EVENTS SCHEDULED.")
-
 with col_news:
     st.markdown(f"### 📰 {asset_info.get('news_query', 'LATEST')} WIRE")
     tab_gen, tab_ff = st.tabs(["📰 GENERAL", "⚡ FOREX FACTORY"])
     def render_news(items):
         if items:
             for news in items:
-                st.markdown(f"""<div style="border-bottom:1px solid #333; padding-bottom:5px; margin-bottom:5px;"><a class='news-link' href='{news['url']}' target='_blank'>▶ {news['title']}</a><br><span style='font-size:0.7em; color:gray;'>{news['time']} | {news['source']}</span></div>""", unsafe_allow_html=True)
+                st.markdown(f"""
+                <div style="border-bottom:1px solid #333; padding-bottom:5px; margin-bottom:5px;">
+                    <a class='news-link' href='{news['url']}' target='_blank'>▶ {news['title']}</a><br>
+                    <span style='font-size:0.7em; color:gray;'>{news['time']} | {news['source']}</span>
+                </div>
+                """, unsafe_allow_html=True)
         else: st.markdown("<div style='color:gray;'>No data.</div>", unsafe_allow_html=True)
     with tab_gen: render_news(news_general)
     with tab_ff: render_news(news_ff)
@@ -977,9 +947,7 @@ with col_news:
 # --- NEW: FRED MACRO DASHBOARD ---
 st.markdown("---")
 st.markdown("### 🇺🇸 FED LIQUIDITY & MACRO (FRED)")
-
-macro_context_data = {} # Store for AI
-
+macro_context_data = {} 
 if fred_key:
     # 1. Fetch Key Series
     df_yield = get_fred_series("T10Y2Y", fred_key)
@@ -995,7 +963,7 @@ if fred_key:
     if not df_cpi.empty: macro_context_data['cpi'] = f"{(df_cpi['value'].pct_change(12).iloc[-1]*100):.2f}"
     if not df_ff.empty: macro_context_data['rates'] = f"{df_ff['value'].iloc[-1]:.2f}"
     if macro_regime: macro_context_data['regime'] = macro_regime['regime']
-
+    
     # --- UI LAYOUT ---
     macro_col_main, macro_col_ml = st.columns([3, 1])
     
@@ -1014,7 +982,6 @@ if fred_key:
                     fig_yc.add_hline(y=0, line_dash="dash", line_color="white")
                     terminal_chart_layout(fig_yc, title=f"10Y-2Y SPREAD: {curr_yield:.2f}%", height=250)
                     st.plotly_chart(fig_yc, use_container_width=True)
-                    # Text Context
                     yc_msg = "⚠️ INVERTED: RECESSION SIGNAL ALERT" if curr_yield < 0 else "NORMAL: GROWTH EXPECTATIONS"
                     st.caption(f"CONTEXT: {yc_msg}")
             
@@ -1026,7 +993,6 @@ if fred_key:
                     terminal_chart_layout(fig_ff, title=f"FED FUNDS RATE: {df_ff['value'].iloc[-1]:.2f}%", height=250)
                     st.plotly_chart(fig_ff, use_container_width=True)
                     st.caption("CONTEXT: BASELINE RISK-FREE RATE (Cost of Capital)")
-
         with macro_tab2:
             c_m3, c_m4 = st.columns(2)
             with c_m3:
@@ -1063,7 +1029,6 @@ if fred_key:
             """, unsafe_allow_html=True)
         else:
             st.warning("Insufficient data for Macro ML.")
-
         # DXY COMPARISON
         st.markdown("#### 💵 DOLLAR (DXY) COMPARE")
         if not correlations.empty and 'Dollar' in correlations:
@@ -1078,7 +1043,6 @@ if fred_key:
             """, unsafe_allow_html=True)
         else:
             st.info("DXY Correlation Unavailable")
-
 else:
     st.info("FRED API Key not found. Add `fred_api_key` to secrets to view Fed Macro Data.")
 
@@ -1086,7 +1050,6 @@ else:
 st.markdown("---")
 st.markdown("### ⚡ QUANTITATIVE RISK & EXECUTION")
 strat_perf = run_strategy_backtest(asset_info['ticker'])
-
 if not intraday_data.empty and strat_perf:
     q1, q2, q3 = st.columns([1, 2, 2])
     with q1:
@@ -1146,7 +1109,13 @@ if gex_df is not None and gex_spot is not None:
         total_gex = gex_df['gex'].sum() / 1_000_000
         sentiment = "LOW VOL (Sticky)" if total_gex > 0 else "HIGH VOL (Slippery)"
         sent_color = "bullish" if total_gex > 0 else "bearish"
-        st.markdown(f"""<div class='terminal-box'><div style='color:#ff9900;'>NET GAMMA</div><div style='font-size:1.5em; color:white;'>${total_gex:.1f}M</div><div style='margin-top:10px;'><span class='{sent_color}'>{sentiment}</span></div></div>""", unsafe_allow_html=True)
+        st.markdown(f"""
+        <div class='terminal-box'>
+            <div style='color:#ff9900;'>NET GAMMA</div>
+            <div style='font-size:1.5em; color:white;'>${total_gex:.1f}M</div>
+            <div style='margin-top:10px;'><span class='{sent_color}'>{sentiment}</span></div>
+        </div>
+        """, unsafe_allow_html=True)
 else: st.warning("GEX Data Unavailable for this asset.")
 
 # --- 7. MONTE CARLO & ADVANCED SEASONALITY ---
@@ -1154,7 +1123,6 @@ st.markdown("---")
 st.markdown("### 🎲 SIMULATION & TIME ANALYSIS")
 pred_dates, pred_paths = generate_monte_carlo(daily_data)
 stats = get_seasonality_stats(daily_data, asset_info['ticker']) 
-
 if stats:
     st.markdown("#### ⏳ SEASONAL TENDENCIES")
     tab_hour, tab_day, tab_week = st.tabs(["HOUR (NY)", "DAY", "WEEK"])
@@ -1179,7 +1147,6 @@ if stats:
             fig_w.add_trace(go.Bar(x=["Wk 1", "Wk 2", "Wk 3", "Wk 4", "Wk 5"], y=wr.values, marker_color=colors))
             terminal_chart_layout(fig_w, title="AVG RETURN BY WEEK OF MONTH", height=350)
             st.plotly_chart(fig_w, use_container_width=True)
-
 st.markdown("#### 🎲 MONTE CARLO PROJECTION")
 if pred_dates is not None and pred_paths is not None:
     fig_pred = go.Figure()
@@ -1189,15 +1156,29 @@ if pred_dates is not None and pred_paths is not None:
     terminal_chart_layout(fig_pred, title="MONTE CARLO PROJECTION (126 Days)", height=400)
     st.plotly_chart(fig_pred, use_container_width=True)
 
-# --- 8. INTELLIGENT EXECUTIVE SUMMARY & THESIS ---
+# --- 8. RESTORED: CFTC COT DISPLAY ---
+if cot_data:
+    st.markdown("---")
+    st.markdown("### 🏛️ CFTC COMMITMENTS OF TRADERS")
+    c_cot1, c_cot2, c_cot3 = st.columns(3)
+    
+    c_cot1.metric("Commercials (Smart Money)", f"{cot_data['comm_net']:,.0f}", help="Commercial Hedgers Net Position")
+    c_cot2.metric("Speculators (Funds)", f"{cot_data['spec_net']:,.0f}", help="Non-Commercial/Managed Money Net Position")
+    c_cot3.markdown(f"""
+    <div class='terminal-box' style='text-align:center;'>
+        <div style='font-size:0.8em; color:gray;'>SENTIMENT</div>
+        <div style='font-size:1.2em; font-weight:bold; color:white;'>{cot_data['sentiment']}</div>
+        <div style='font-size:0.7em;'>Date: {cot_data['date']}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+# --- 9. INTELLIGENT EXECUTIVE SUMMARY & THESIS ---
 st.markdown("---")
 st.markdown("### 🧠 AI QUANT ANALYST")
-
 # Prepare Data for LLM
 gex_summary = gex_df if gex_df is not None else None
 ml_signal_str = "BULLISH" if ml_prob > 0.55 else "BEARISH" if ml_prob < 0.45 else "NEUTRAL"
 news_text_summary = "\n".join([f"- {n['title']} ({n['source']})" for n in combined_news_for_llm])
-
 if gemini_key:
     col_exec_btn, col_exec_info = st.columns([1, 4])
     with col_exec_btn:
@@ -1210,14 +1191,16 @@ if gemini_key:
                 )
                 st.session_state['narrative_cache'] = narrative
                 st.rerun()
-
     with col_exec_info:
         st.markdown("<span style='color:gray; vertical-align:middle;'>3-bullet Executive Summary (Costs 1 Gemini Call)</span>", unsafe_allow_html=True)
-
     if st.session_state['narrative_cache']:
         if "⚠️" in st.session_state['narrative_cache']: st.error(st.session_state['narrative_cache'])
         else:
-            st.markdown(f"""<div class='terminal-box' style='border-left: 4px solid #00e6ff;'><div style='font-family: monospace; font-size: 0.95em; white-space: pre-wrap;'>{st.session_state['narrative_cache']}</div></div>""", unsafe_allow_html=True)
+            st.markdown(f"""
+            <div class='terminal-box' style='border-left: 4px solid #00e6ff;'>
+                <div style='font-family: monospace; font-size: 0.95em; white-space: pre-wrap;'>{st.session_state['narrative_cache']}</div>
+            </div>
+            """, unsafe_allow_html=True)
     
     st.markdown("---")
     col_thesis_btn, col_thesis_info = st.columns([1, 4])
@@ -1231,14 +1214,15 @@ if gemini_key:
                 )
                 st.session_state['thesis_cache'] = thesis_text
                 st.rerun()
-
     with col_thesis_info:
         st.markdown("<span style='color:gray;'>Full 4-paragraph Hedge Fund style report. (Costs 1 Gemini Call)</span>", unsafe_allow_html=True)
-
     if st.session_state['thesis_cache']:
         if "⚠️" in st.session_state['thesis_cache']: st.error(st.session_state['thesis_cache'])
         else:
-            st.markdown(f"""<div class='terminal-box' style='border: 1px solid #444; padding: 20px;'>{st.session_state['thesis_cache']}</div>""", unsafe_allow_html=True)
-
+            st.markdown(f"""
+            <div class='terminal-box' style='border: 1px solid #444; padding: 20px;'>
+                {st.session_state['thesis_cache']}
+            </div>
+            """, unsafe_allow_html=True)
 else:
     st.info("Add GEMINI_API_KEY to see the AI Analyst Report.")
