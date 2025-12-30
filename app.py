@@ -15,7 +15,7 @@ import os
 import time
 
 # --- APP CONFIGURATION ---
-st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V5.3", page_icon="💹")
+st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V5.4", page_icon="💹")
 
 # --- BLOOMBERG TERMINAL STYLING (CSS) ---
 st.markdown("""
@@ -66,8 +66,19 @@ st.markdown("""
     .stTabs [aria-selected="true"] { background-color: #ff9900; color: black !important; font-weight: bold;}
     button { border-radius: 0px !important; border: 1px solid #ff9900 !important; color: #ff9900 !important; background: black !important; }
     hr { margin: 1em 0; border: 0; border-top: 1px solid #333; }
+    
+    /* API Limit Progress Bars */
+    .stProgress > div > div > div > div { background-color: #ff9900; }
 </style>
 """, unsafe_allow_html=True)
+
+# --- SESSION STATE INITIALIZATION (For API Tracking) ---
+if 'gemini_calls' not in st.session_state: st.session_state['gemini_calls'] = 0
+if 'news_calls' not in st.session_state: st.session_state['news_calls'] = 0
+if 'rapid_calls' not in st.session_state: st.session_state['rapid_calls'] = 0
+if 'coingecko_calls' not in st.session_state: st.session_state['coingecko_calls'] = 0
+if 'narrative_cache' not in st.session_state: st.session_state['narrative_cache'] = None
+if 'thesis_cache' not in st.session_state: st.session_state['thesis_cache'] = None
 
 # --- CONSTANTS & MAPPINGS ---
 ASSETS = {
@@ -130,20 +141,19 @@ def flatten_dataframe(df):
     df = df.loc[:, ~df.columns.duplicated()]
     return df
 
-# --- COINGECKO API ENGINE (DEMO TIER SAFE) ---
-@st.cache_data(ttl=300) # CACHE: 5 Minutes (Safe for 30 calls/min limit)
+# --- COINGECKO API ENGINE ---
+@st.cache_data(ttl=300) 
 def get_coingecko_stats(cg_id, api_key):
     """Fetches fundamental data from CoinGecko Demo API."""
     if not cg_id or not api_key: return None
     
+    # Track usage
+    st.session_state['coingecko_calls'] += 1
+    
     url = f"https://api.coingecko.com/api/v3/coins/{cg_id}"
     params = {
-        "localization": "false",
-        "tickers": "false",
-        "market_data": "true",
-        "community_data": "true",
-        "developer_data": "true",
-        "sparkline": "false"
+        "localization": "false", "tickers": "false", "market_data": "true",
+        "community_data": "true", "developer_data": "true", "sparkline": "false"
     }
     headers = {"x-cg-demo-api-key": api_key}
     
@@ -160,16 +170,18 @@ def get_coingecko_stats(cg_id, api_key):
                 "desc": data.get('description', {}).get('en', '').split('.')[0] + "." 
             }
         return None
-    except Exception as e:
+    except Exception:
         return None
 
-# --- LLM ENGINE (DYNAMIC MODEL FINDER) ---
-@st.cache_data(ttl=900) # CACHE: 15 Mins
+# --- LLM ENGINE (SAFE MODE) ---
 def get_technical_narrative(ticker, price, daily_pct, regime, ml_signal, gex_data, cot_data, levels, api_key):
     """
     Standard View: 3 Bullet Executive Summary.
     """
     if not api_key: return "AI Analyst unavailable (No Key)."
+    
+    # Track Usage
+    st.session_state['gemini_calls'] += 1
     
     # Format data for Prompt
     gex_text = "N/A"
@@ -182,104 +194,67 @@ def get_technical_narrative(ticker, price, daily_pct, regime, ml_signal, gex_dat
         lvl_text = f"Pivot: {levels['Pivot']:.2f}, R1: {levels['R1']:.2f}, S1: {levels['S1']:.2f}"
 
     prompt = f"""
-    You are a Senior Portfolio Manager at a Quant Hedge Fund. 
-    Analyze the following technical data for {ticker} and write a 3-bullet executive summary.
-
-    ### MARKET DATA
-    - Price: {price:,.2f} ({daily_pct:.2f}%)
-    - Market Regime: {regime['regime'] if regime else 'Unknown'} (Confidence: {regime['confidence'] if regime else 0:.2f})
-    - ML Algo Forecast: {ml_signal}
-    - Institutional Gamma (GEX): {gex_text}
-    - Smart Money (COT): {cot_data['sentiment'] if cot_data else 'N/A'} (Net Comm: {cot_data['comm_net'] if cot_data else 0:,.0f})
-    - Key Levels: {lvl_text}
-
-    ### TASK
-    1. Synthesize the conflict/confluence between the Regime (Trend), ML (Probability), and GEX (Volatility).
-    2. Identify the key trigger level for a trade based on the 'Key Levels'.
-    3. Give a final "Execution" bias (e.g., "Fade Rallies", "Buy Dips", "Do Nothing").
+    You are a Senior Portfolio Manager. Analyze technical data for {ticker} and write a 3-bullet executive summary.
     
-    Keep it professional, concise, and jargon-heavy (Bloomberg Terminal style). Do not use markdown bolding.
+    DATA: Price: {price:,.2f} ({daily_pct:.2f}%), Regime: {regime['regime'] if regime else 'Unknown'}, 
+    ML: {ml_signal}, GEX: {gex_text}, COT: {cot_data['sentiment'] if cot_data else 'N/A'}, Levels: {lvl_text}
+
+    TASK:
+    1. Synthesize Regime (Trend), ML (Prob), and GEX (Vol).
+    2. Identify key trigger level.
+    3. Final Execution bias ("Buy Dips", "Fade", etc).
+    Keep it concise. Bloomberg Terminal style.
     """
 
     try:
         genai.configure(api_key=api_key)
-        
-        available_models = []
-        try:
-            for m in genai.list_models():
-                if 'generateContent' in m.supported_generation_methods:
-                    available_models.append(m)
-        except Exception as e:
-            return f"Error listing models: {str(e)}"
-            
-        if not available_models:
-            return "Error: No models found. Your API Key may be invalid or lacks permissions."
-            
-        # Prefer Flash for speed
-        available_models.sort(key=lambda x: 'flash' not in x.name) 
-        chosen_model = available_models[0]
-        
-        model = genai.GenerativeModel(chosen_model.name)
+        model = genai.GenerativeModel("gemini-1.5-flash") # Use Flash for speed/cost
         response = model.generate_content(prompt)
         return response.text
-            
     except Exception as e:
-        return f"AI Analyst unavailable: {str(e)}"
+        error_msg = str(e)
+        if "429" in error_msg or "ResourceExhausted" in error_msg:
+            return "⚠️ API LIMIT REACHED: The AI Analyst is taking a nap. (Quota Exceeded)"
+        return f"AI Analyst unavailable: {error_msg}"
 
-# --- NEW: DEEP DIVE THESIS GENERATOR ---
 def generate_deep_dive_thesis(ticker, price, change, regime, ml_signal, gex_data, cot_data, levels, news_summary, api_key):
     """
     On-Demand View: Full 4-Paragraph Investment Thesis.
     """
     if not api_key: return "API Key Missing."
     
+    # Track Usage
+    st.session_state['gemini_calls'] += 1
+    
     gex_text = "N/A"
     if gex_data is not None:
         total_gex = gex_data['gex'].sum()
-        gex_text = f"Net Gamma: ${total_gex/1_000_000:.1f}M ({'Long/Sticky' if total_gex>0 else 'Short/Volatile'})"
-
-    lvl_text = "N/A"
-    if levels:
-        lvl_text = f"Pivot: {levels['Pivot']:.2f}, R1: {levels['R1']:.2f}, S1: {levels['S1']:.2f}"
+        gex_text = f"Net Gamma: ${total_gex/1_000_000:.1f}M"
 
     prompt = f"""
-    You are a Senior Investment Strategist. Write a detailed "Deep Dive" Investment Thesis for {ticker}.
+    Write a detailed Investment Thesis for {ticker}.
     
-    ### INPUT DATA
-    - Price: {price:,.2f} ({change:.2f}%)
-    - Trend Regime: {regime['regime'] if regime else 'Unknown'}
-    - ML Probability: {ml_signal}
-    - GEX (Volatility): {gex_text}
-    - COT (Positioning): {cot_data['sentiment'] if cot_data else 'N/A'}
-    - Key Levels: {lvl_text}
-    - Recent News/Context: {news_summary}
+    DATA: Price: {price:,.2f} ({change:.2f}%), Regime: {regime['regime'] if regime else 'Unknown'}, 
+    ML: {ml_signal}, GEX: {gex_text}, COT: {cot_data['sentiment'] if cot_data else 'N/A'}
+    NEWS: {news_summary}
 
-    ### REQUIRED OUTPUT FORMAT (MARKDOWN)
-    
-    ### 1. THE CORE ARGUMENT
-    (State clearly if we are Long, Short, or Neutral. Connect the Macro News with the Trend Regime. Be opinionated.)
-    
-    ### 2. SUPPORTING DATA
-    (Cite the specific numbers provided above. e.g., "The bullish case is supported by Positive Gamma of $XM..." or "Smart Money is shorting into strength...")
-    
-    ### 3. THE BEAR CASE (RISKS)
-    (What kills this trade? Is it a Fed announcement? A break of the Pivot level?)
-    
-    ### 4. INVALIDATION LEVEL
-    (At what specific price does this thesis fail? Use the Key Levels provided.)
+    OUTPUT FORMAT (Markdown):
+    ### 1. THE CORE ARGUMENT (Long/Short/Neutral opinion)
+    ### 2. SUPPORTING DATA (Cite specific numbers)
+    ### 3. THE BEAR CASE (Risks)
+    ### 4. INVALIDATION LEVEL (Price failure point)
     """
     
     try:
         genai.configure(api_key=api_key)
-        # We find models again to be safe
-        available_models = [m for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        available_models.sort(key=lambda x: 'flash' not in x.name)
-        
-        model = genai.GenerativeModel(available_models[0].name)
+        model = genai.GenerativeModel("gemini-1.5-flash")
         response = model.generate_content(prompt)
         return response.text
     except Exception as e:
-        return f"Thesis Generation Failed: {str(e)}"
+        error_msg = str(e)
+        if "429" in error_msg or "ResourceExhausted" in error_msg:
+            return "⚠️ CRITICAL: API LIMIT REACHED. Thesis generation paused to prevent overage."
+        return f"Thesis Generation Failed: {error_msg}"
 
 # --- 1. QUANT ENGINE (GMM + HURST) ---
 def calculate_hurst(series, lags=range(2, 20)):
@@ -531,6 +506,7 @@ def analyze_eco_context(actual_str, forecast_str, previous_str):
 @st.cache_data(ttl=14400) # CACHE: 4 Hours (Prevents hitting NewsAPI 100/day limit)
 def get_financial_news_general(api_key, query="Finance"):
     if not api_key: return []
+    st.session_state['news_calls'] += 1
     try:
         newsapi = NewsApiClient(api_key=api_key)
         all_articles = newsapi.get_everything(q=query, language='en', sort_by='publishedAt')
@@ -545,6 +521,7 @@ def get_financial_news_general(api_key, query="Finance"):
 def get_forex_factory_news(api_key, news_type='breaking'):
     """Fetches news from Forex Factory Scraper via RapidAPI."""
     if not api_key: return []
+    st.session_state['rapid_calls'] += 1
     
     base_url = "https://forex-factory-scraper1.p.rapidapi.com/"
     endpoints = {
@@ -583,6 +560,7 @@ def get_forex_factory_news(api_key, news_type='breaking'):
 @st.cache_data(ttl=21600) # CACHE: 6 Hours (Economic Events rarely change intraday)
 def get_economic_calendar(api_key):
     if not api_key: return None
+    st.session_state['rapid_calls'] += 1
     
     # Priority 1: Forex Factory
     try:
@@ -850,13 +828,29 @@ with st.sidebar:
     
     st.markdown("---")
     
-    st.markdown("**MACRO CORRELATIONS (20D)**")
-    corrs = get_correlations(asset_info['ticker'])
-    if not corrs.empty:
-        for idx, val in corrs.items():
-            c_color = "#ff3333" if val > 0.5 else "#00ff00" if val < -0.5 else "gray" 
-            st.markdown(f"{idx}: <span style='color:{c_color}'>{val:.2f}</span>", unsafe_allow_html=True)
-    
+    # --- NEW: API QUOTA MONITOR ---
+    with st.expander("📡 API QUOTA MONITOR", expanded=True):
+        st.markdown("<div style='font-size:0.7em; color:gray;'>Session Usage vs Hard Limits</div>", unsafe_allow_html=True)
+        
+        # NewsAPI
+        st.write(f"**NewsAPI** ({st.session_state['news_calls']} / 100 Daily)")
+        st.progress(min(st.session_state['news_calls'] / 100, 1.0))
+        
+        # Gemini
+        st.write(f"**Gemini AI** ({st.session_state['gemini_calls']} / 20 Daily)")
+        st.progress(min(st.session_state['gemini_calls'] / 20, 1.0))
+        
+        # RapidAPI
+        st.write(f"**RapidAPI** ({st.session_state['rapid_calls']} / 10 Monthly)")
+        if st.session_state['rapid_calls'] > 10:
+             st.markdown("<span style='color:red; font-weight:bold;'>OVER LIMIT</span>", unsafe_allow_html=True)
+        else:
+             st.progress(st.session_state['rapid_calls'] / 10)
+             
+        # CoinGecko
+        st.write(f"**CoinGecko** ({st.session_state['coingecko_calls']} / 10k Mthly)")
+        st.progress(min(st.session_state['coingecko_calls'] / 10000, 1.0))
+
     st.markdown("---")
     
     # API KEY HANDLING
@@ -865,20 +859,12 @@ with st.sidebar:
     gemini_key = get_api_key("gemini_api_key")
     cg_key = get_api_key("coingecko_key") 
     
-    st.markdown(f"""
-    <div style='font-size:0.8em; color:gray; font-family:Courier New;'>
-    API STATUS:<br>
-    RAPID: {'[OK]' if rapid_key else '[FAIL]'}<br>
-    NEWS: {'[OK]' if news_key else '[FAIL]'}<br>
-    GEMINI: {'[OK]' if gemini_key else '[FAIL]'}<br>
-    GECKO: {'[OK]' if cg_key else '[FAIL]'}
-    </div>
-    """, unsafe_allow_html=True)
-    
-    if st.button(">> REFRESH DATA"): st.cache_data.clear()
+    if st.button(">> REFRESH DATA"): 
+        st.cache_data.clear()
+        st.rerun()
 
 # --- MAIN DASHBOARD ---
-st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V5.3</span></h1>", unsafe_allow_html=True)
+st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V5.4</span></h1>", unsafe_allow_html=True)
 
 # Fetch Data
 daily_data = get_daily_data(asset_info['ticker'])
@@ -1275,60 +1261,63 @@ st.markdown("### 🧠 AI QUANT ANALYST")
 # Prepare General Data for LLM
 gex_summary = gex_df if gex_df is not None else None
 ml_signal_str = "BULLISH" if ml_prob > 0.55 else "BEARISH" if ml_prob < 0.45 else "NEUTRAL"
-
-# Create formatted News Summary for Deep Dive
 news_text_summary = "\n".join([f"- {n['title']} ({n['source']})" for n in combined_news_for_llm])
 
 if gemini_key:
-    # --- 9A. EXECUTIVE SUMMARY (DEFAULT) ---
-    with st.spinner("👨‍💻 Quant Analyst is synthesizing data..."):
-        # We pass the raw quantitative data to the LLM
-        narrative = get_technical_narrative(
-            ticker=selected_asset,
-            price=curr,
-            daily_pct=pct,
-            regime=regime_data,
-            ml_signal=ml_signal_str,
-            gex_data=gex_summary,
-            cot_data=cot_data,
-            levels=key_levels,
-            api_key=gemini_key
-        )
-    
-    # Display the result in a "Chat" style box
-    st.markdown(f"""
-    <div class='terminal-box' style='border-left: 4px solid #ff9900;'>
-        <div style='font-family: monospace; font-size: 0.95em; white-space: pre-wrap;'>{narrative}</div>
-    </div>
-    """, unsafe_allow_html=True)
+    # --- 9A. EXECUTIVE SUMMARY (ON DEMAND ONLY) ---
+    col_exec_btn, col_exec_info = st.columns([1, 4])
+    with col_exec_btn:
+        # We use a button AND check session state to keep the report visible
+        if st.button("📝 GENERATE BRIEF"):
+            with st.spinner("Analyzing Technicals..."):
+                narrative = get_technical_narrative(
+                    ticker=selected_asset, price=curr, daily_pct=pct, regime=regime_data,
+                    ml_signal=ml_signal_str, gex_data=gex_summary, cot_data=cot_data,
+                    levels=key_levels, api_key=gemini_key
+                )
+                st.session_state['narrative_cache'] = narrative
+                st.rerun() # Rerun to update the session state and progress bars
+
+    with col_exec_info:
+        st.markdown("<span style='color:gray; vertical-align:middle;'>Generates a 3-bullet Executive Summary (Costs 1 Gemini Call)</span>", unsafe_allow_html=True)
+
+    # Display Executive Summary if it exists in session state
+    if st.session_state['narrative_cache']:
+        # Check for error message in the output
+        if "⚠️" in st.session_state['narrative_cache']:
+             st.error(st.session_state['narrative_cache'])
+        else:
+            st.markdown(f"""
+            <div class='terminal-box' style='border-left: 4px solid #00e6ff;'>
+                <div style='font-family: monospace; font-size: 0.95em; white-space: pre-wrap;'>{st.session_state['narrative_cache']}</div>
+            </div>
+            """, unsafe_allow_html=True)
     
     # --- 9B. THESIS MODE (ON DEMAND) ---
     st.markdown("---")
-    col_thesis_btn, col_thesis_info = st.columns([1, 3])
+    col_thesis_btn, col_thesis_info = st.columns([1, 4])
     with col_thesis_btn:
-        generate_thesis = st.button("📝 GENERATE DEEP DIVE THESIS")
-        
-    with col_thesis_info:
-        st.markdown("<span style='color:gray; font-size:0.8em;'>Generates a full 4-paragraph Hedge Fund style report including Macro, Technicals, and Bear/Bull cases. (Slower)</span>", unsafe_allow_html=True)
+        if st.button("🔎 DEEP DIVE THESIS"):
+            with st.spinner("Analyzing Macro, Gamma, and Order Flow..."):
+                thesis_text = generate_deep_dive_thesis(
+                    ticker=selected_asset, price=curr, change=pct, regime=regime_data,
+                    ml_signal=ml_signal_str, gex_data=gex_summary, cot_data=cot_data,
+                    levels=key_levels, news_summary=news_text_summary, api_key=gemini_key
+                )
+                st.session_state['thesis_cache'] = thesis_text
+                st.rerun()
 
-    if generate_thesis:
-        with st.spinner("🕵️‍♂️ Analyzing Macro, Gamma, and Order Flow... (approx 10s)"):
-            thesis_text = generate_deep_dive_thesis(
-                ticker=selected_asset,
-                price=curr,
-                change=pct,
-                regime=regime_data,
-                ml_signal=ml_signal_str,
-                gex_data=gex_summary,
-                cot_data=cot_data,
-                levels=key_levels,
-                news_summary=news_text_summary,
-                api_key=gemini_key
-            )
-            
+    with col_thesis_info:
+        st.markdown("<span style='color:gray;'>Generates a full 4-paragraph Hedge Fund style report. (Costs 1 Gemini Call)</span>", unsafe_allow_html=True)
+
+    if st.session_state['thesis_cache']:
+        # Check for error message in the output
+        if "⚠️" in st.session_state['thesis_cache']:
+             st.error(st.session_state['thesis_cache'])
+        else:
             st.markdown(f"""
             <div class='terminal-box' style='border: 1px solid #444; padding: 20px;'>
-                {thesis_text}
+                {st.session_state['thesis_cache']}
             </div>
             """, unsafe_allow_html=True)
 
