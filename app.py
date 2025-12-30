@@ -15,7 +15,7 @@ import os
 import time
 
 # --- APP CONFIGURATION ---
-st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V5.4", page_icon="💹")
+st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V5.5", page_icon="💹")
 
 # --- BLOOMBERG TERMINAL STYLING (CSS) ---
 st.markdown("""
@@ -448,16 +448,22 @@ def get_seasonality_stats(daily_data, ticker_name):
 
 @st.cache_data(ttl=3600)
 def generate_monte_carlo(stock_data, days=126, simulations=1000):
-    close = stock_data['Close']
-    log_returns = np.log(1 + close.pct_change())
-    u, var = log_returns.mean(), log_returns.var()
-    drift = u - (0.5 * var)
-    stdev = log_returns.std()
-    price_paths = np.zeros((days + 1, simulations))
-    price_paths[0] = close.iloc[-1]
-    daily_returns = np.exp(drift + stdev * np.random.normal(0, 1, (days, simulations)))
-    for t in range(1, days + 1): price_paths[t] = price_paths[t - 1] * daily_returns[t - 1]
-    return pd.date_range(start=close.index[-1], periods=days + 1, freq='B'), price_paths
+    # CRITICAL FIX: Check for empty data before processing
+    if stock_data is None or stock_data.empty or len(stock_data) < 2:
+        return None, None
+    try:
+        close = stock_data['Close']
+        log_returns = np.log(1 + close.pct_change())
+        u, var = log_returns.mean(), log_returns.var()
+        drift = u - (0.5 * var)
+        stdev = log_returns.std()
+        price_paths = np.zeros((days + 1, simulations))
+        price_paths[0] = close.iloc[-1]
+        daily_returns = np.exp(drift + stdev * np.random.normal(0, 1, (days, simulations)))
+        for t in range(1, days + 1): price_paths[t] = price_paths[t - 1] * daily_returns[t - 1]
+        return pd.date_range(start=close.index[-1], periods=days + 1, freq='B'), price_paths
+    except Exception as e:
+        return None, None
 
 # --- 6. NEWS & ECONOMICS ---
 def parse_eco_value(val_str):
@@ -864,7 +870,7 @@ with st.sidebar:
         st.rerun()
 
 # --- MAIN DASHBOARD ---
-st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V5.4</span></h1>", unsafe_allow_html=True)
+st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V5.5</span></h1>", unsafe_allow_html=True)
 
 # Fetch Data
 daily_data = get_daily_data(asset_info['ticker'])
@@ -1231,12 +1237,15 @@ st.markdown("---")
 
 # --- MONTE CARLO ---
 st.markdown("#### 🎲 MONTE CARLO PROJECTION")
-fig_pred = go.Figure()
-hist_slice = daily_data['Close'].tail(90)
-fig_pred.add_trace(go.Scatter(x=hist_slice.index, y=hist_slice.values, name='History', line=dict(color='white')))
-fig_pred.add_trace(go.Scatter(x=pred_dates, y=np.mean(pred_paths, axis=1), name='Avg Path', line=dict(color='#ff9900', dash='dash')))
-terminal_chart_layout(fig_pred, title="MONTE CARLO PROJECTION (126 Days)", height=400)
-st.plotly_chart(fig_pred, use_container_width=True)
+if pred_dates is not None and pred_paths is not None:
+    fig_pred = go.Figure()
+    hist_slice = daily_data['Close'].tail(90)
+    fig_pred.add_trace(go.Scatter(x=hist_slice.index, y=hist_slice.values, name='History', line=dict(color='white')))
+    fig_pred.add_trace(go.Scatter(x=pred_dates, y=np.mean(pred_paths, axis=1), name='Avg Path', line=dict(color='#ff9900', dash='dash')))
+    terminal_chart_layout(fig_pred, title="MONTE CARLO PROJECTION (126 Days)", height=400)
+    st.plotly_chart(fig_pred, use_container_width=True)
+else:
+    st.info("Insufficient data for Monte Carlo simulation (Ticker may be invalid or data feed down).")
 
 # --- 8. CFTC COT DISPLAY ---
 if cot_data:
