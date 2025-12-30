@@ -15,7 +15,7 @@ import os
 import time
 
 # --- APP CONFIGURATION ---
-st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V5.6", page_icon="💹")
+st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V5.7", page_icon="💹")
 
 # --- BLOOMBERG TERMINAL STYLING (CSS) ---
 st.markdown("""
@@ -140,6 +140,26 @@ def flatten_dataframe(df):
         df.columns = df.columns.get_level_values(0)
     df = df.loc[:, ~df.columns.duplicated()]
     return df
+
+# --- SAFE YFINANCE WRAPPER (RATE LIMIT PROTECTION) ---
+def safe_yf_download(tickers, period, interval, retries=3):
+    """
+    Wraps yf.download with auto-retry and exponential backoff 
+    to prevent 'Too Many Requests' errors.
+    """
+    for i in range(retries):
+        try:
+            # We add a small delay to be kind to the API
+            time.sleep(0.1) 
+            df = yf.download(tickers, period=period, interval=interval, progress=False)
+            if not df.empty:
+                return flatten_dataframe(df)
+        except Exception as e:
+            if i == retries - 1: # Last try
+                print(f"Failed to fetch {tickers}: {e}")
+                return pd.DataFrame()
+            time.sleep(2 ** i) # Exponential backoff: 1s, 2s, 4s...
+    return pd.DataFrame()
 
 # --- COINGECKO API ENGINE ---
 @st.cache_data(ttl=300) 
@@ -267,8 +287,8 @@ def calculate_hurst(series, lags=range(2, 20)):
 @st.cache_data(ttl=3600)
 def get_market_regime(ticker):
     try:
-        df = yf.download(ticker, period="5y", interval="1d", progress=False)
-        df = flatten_dataframe(df)
+        # UPDATED: Use safe wrapper
+        df = safe_yf_download(ticker, period="5y", interval="1d")
         if df.empty: return None
         
         data = df.copy()
@@ -303,8 +323,8 @@ def get_market_regime(ticker):
 @st.cache_data(ttl=3600)
 def get_ml_prediction(ticker):
     try:
-        df = yf.download(ticker, period="2y", interval="1d", progress=False)
-        df = flatten_dataframe(df) 
+        # UPDATED: Use safe wrapper
+        df = safe_yf_download(ticker, period="2y", interval="1d") 
         if df.empty: return None, 0.5
         
         data = df.copy()
@@ -425,8 +445,8 @@ def get_seasonality_stats(daily_data, ticker_name):
         week_stats = df.groupby('Month_Week')['Returns'].mean() * 100
         stats['week_returns'] = week_stats
         try:
-            intra = yf.download(ticker_name, period="60d", interval="1h", progress=False)
-            intra = flatten_dataframe(intra)
+            # UPDATED: Use safe wrapper
+            intra = safe_yf_download(ticker_name, period="60d", interval="1h")
             
             if not intra.empty:
                 if intra.index.tz is None:
@@ -678,8 +698,8 @@ def get_economic_calendar(api_key):
 @st.cache_data(ttl=300)
 def run_strategy_backtest(ticker):
     try:
-        df = yf.download(ticker, period="2y", interval="1d", progress=False)
-        df = flatten_dataframe(df)
+        # UPDATED: Use safe wrapper
+        df = safe_yf_download(ticker, period="2y", interval="1d")
         if df.empty: return None
         df['Returns'] = df['Close'].pct_change()
         df['Range'] = df['High'] - df['Low']
@@ -744,11 +764,9 @@ def calculate_vwap_bands(df):
 @st.cache_data(ttl=300) # Increased TTL for safety
 def get_relative_strength(asset_ticker, benchmark_ticker="SPY"):
     try:
-        asset = yf.download(asset_ticker, period="5d", interval="15m", progress=False)
-        bench = yf.download(benchmark_ticker, period="5d", interval="15m", progress=False)
-        
-        asset = flatten_dataframe(asset)
-        bench = flatten_dataframe(bench)
+        # UPDATED: Use safe wrapper
+        asset = safe_yf_download(asset_ticker, period="5d", interval="15m")
+        bench = safe_yf_download(benchmark_ticker, period="5d", interval="15m")
         
         if asset.empty or bench.empty: return pd.DataFrame()
         
@@ -802,8 +820,10 @@ def get_correlations(base_ticker):
             "Gold": "GC=F"
         }
         
-        data = yf.download(list(tickers.values()), period="6mo", progress=False)['Close']
-        data = flatten_dataframe(data)
+        # UPDATED: Use safe wrapper
+        data = safe_yf_download(list(tickers.values()), period="6mo", interval="1d")
+        if data.empty: return pd.Series()
+        data = data['Close']
         
         rev_tickers = {v: k for k, v in tickers.items()}
         data.rename(columns=rev_tickers, inplace=True)
@@ -858,15 +878,15 @@ def get_cot_data(asset_name):
 @st.cache_data(ttl=300) # Increased to 5 mins
 def get_daily_data(ticker):
     try:
-        data = yf.download(ticker, period="10y", interval="1d", progress=False)
-        return flatten_dataframe(data)
+        # UPDATED: Use safe wrapper
+        return safe_yf_download(ticker, period="10y", interval="1d")
     except: return pd.DataFrame()
 
 @st.cache_data(ttl=300) # Increased to 5 mins
 def get_intraday_data(ticker):
     try:
-        data = yf.download(ticker, period="5d", interval="15m", progress=False)
-        return flatten_dataframe(data)
+        # UPDATED: Use safe wrapper
+        return safe_yf_download(ticker, period="5d", interval="15m")
     except: return pd.DataFrame()
 
 def terminal_chart_layout(fig, title="", height=350):
@@ -927,7 +947,7 @@ with st.sidebar:
         st.rerun()
 
 # --- MAIN DASHBOARD ---
-st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V5.6</span></h1>", unsafe_allow_html=True)
+st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V5.7</span></h1>", unsafe_allow_html=True)
 
 # Fetch Data
 daily_data = get_daily_data(asset_info['ticker'])
