@@ -114,7 +114,7 @@ ASSETS = {
     "Polygon": {"ticker": "MATIC-USD", "opt_ticker": None, "news_query": "Polygon MATIC", "cg_id": "matic-network"},
 }
 
-# ENHANCED COT MAPPING (Matched to new logic)
+# COT MAPPING
 COT_MAPPING = {
     "Gold (Comex)": {
         "keywords": ["GOLD", "COMMODITY EXCHANGE"], 
@@ -160,11 +160,18 @@ def get_api_key(key_name):
         return os.environ[key_name]
     return None
 
+# --- FIX 1: ROBUST DATAFRAME FLATTENER (Prevents yfinance MultiIndex crashes) ---
 def flatten_dataframe(df):
     if df.empty: return df
     df = df.copy()
     if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
+        # Check if level 0 contains standard price columns (Open, Close, etc)
+        if 'Close' in df.columns.get_level_values(0):
+            df.columns = df.columns.get_level_values(0)
+        # Sometimes yf puts Ticker in Level 0 and Price in Level 1
+        elif df.columns.nlevels > 1 and 'Close' in df.columns.get_level_values(1):
+            df.columns = df.columns.get_level_values(1)
+            
     df = df.loc[:, ~df.columns.duplicated()]
     return df
 
@@ -226,7 +233,7 @@ def get_coingecko_stats(cg_id, api_key):
         return None
     except Exception: return None
 
-# --- LLM ENGINE (DYNAMIC MODEL FINDER - FIXED) ---
+# --- LLM ENGINE ---
 def get_technical_narrative(ticker, price, daily_pct, regime, ml_signal, gex_data, cot_data, levels, macro_data, api_key):
     if not api_key: return "AI Analyst unavailable (No Key)."
     st.session_state['gemini_calls'] += 1
@@ -242,11 +249,15 @@ def get_technical_narrative(ticker, price, daily_pct, regime, ml_signal, gex_dat
     macro_str = "N/A"
     if macro_data:
         macro_str = f"YieldCurve: {macro_data.get('yield_curve', 'N/A')}, Inflation(CPI): {macro_data.get('cpi', 'N/A')}%, Rates: {macro_data.get('rates', 'N/A')}%, MacroRegime: {macro_data.get('regime', 'N/A')}"
-        
+    
+    cot_str = "N/A"
+    if cot_data and 'sentiment' in cot_data:
+        cot_str = cot_data['sentiment']
+
     prompt = f"""
     You are a Senior Portfolio Manager. Analyze data for {ticker} and write a 3-bullet executive summary.
     DATA: Price: {price:,.2f} ({daily_pct:.2f}%), Regime: {regime['regime'] if regime else 'Unknown'}, 
-    ML: {ml_signal}, GEX: {gex_text}, COT: {cot_data['sentiment'] if cot_data else 'N/A'}, Levels: {lvl_text}
+    ML: {ml_signal}, GEX: {gex_text}, COT: {cot_str}, Levels: {lvl_text}
     MACRO CONTEXT: {macro_str}
     TASK:
     1. Synthesize Technicals + Macro.
@@ -257,19 +268,16 @@ def get_technical_narrative(ticker, price, daily_pct, regime, ml_signal, gex_dat
     try:
         genai.configure(api_key=api_key)
         
-        # --- AUTO-DISCOVER MODELS (V4.7 Logic) ---
+        # Auto-discover models
         available_models = []
         for m in genai.list_models():
             if 'generateContent' in m.supported_generation_methods:
                 available_models.append(m)
         
-        if not available_models:
-            return "Error: No valid models found. Check API Key permissions."
+        if not available_models: return "Error: No valid models found. Check API Key permissions."
             
-        # Prefer 'flash' -> 'pro' -> others
         available_models.sort(key=lambda x: 'flash' not in x.name)
         chosen_model_name = available_models[0].name
-        # ----------------------------------------
         
         model = genai.GenerativeModel(chosen_model_name)
         response = model.generate_content(prompt)
@@ -290,10 +298,14 @@ def generate_deep_dive_thesis(ticker, price, change, regime, ml_signal, gex_data
     if macro_data:
         macro_str = f"YieldCurve: {macro_data.get('yield_curve', 'N/A')}, CPI: {macro_data.get('cpi', 'N/A')}%, Rates: {macro_data.get('rates', 'N/A')}%, Regime: {macro_data.get('regime', 'N/A')}"
     
+    cot_str = "N/A"
+    if cot_data and 'sentiment' in cot_data:
+        cot_str = cot_data['sentiment']
+
     prompt = f"""
     Write a detailed Investment Thesis for {ticker}.
     DATA: Price: {price:,.2f} ({change:.2f}%), Regime: {regime['regime'] if regime else 'Unknown'}, 
-    ML: {ml_signal}, GEX: {gex_text}, COT: {cot_data['sentiment'] if cot_data else 'N/A'}
+    ML: {ml_signal}, GEX: {gex_text}, COT: {cot_str}
     MACRO: {macro_str}
     NEWS: {news_summary}
     OUTPUT FORMAT (Markdown):
@@ -304,19 +316,13 @@ def generate_deep_dive_thesis(ticker, price, change, regime, ml_signal, gex_data
     """
     try:
         genai.configure(api_key=api_key)
-        
-        # --- AUTO-DISCOVER MODELS (V4.7 Logic) ---
         available_models = []
         for m in genai.list_models():
             if 'generateContent' in m.supported_generation_methods:
                 available_models.append(m)
-        
-        if not available_models:
-            return "Error: No valid models found."
-            
+        if not available_models: return "Error: No valid models found."
         available_models.sort(key=lambda x: 'flash' not in x.name)
         chosen_model_name = available_models[0].name
-        # ----------------------------------------
         
         model = genai.GenerativeModel(chosen_model_name)
         response = model.generate_content(prompt)
@@ -324,19 +330,15 @@ def generate_deep_dive_thesis(ticker, price, change, regime, ml_signal, gex_data
     except Exception as e:
         return f"Thesis Generation Failed: {str(e)}"
 
-# --- NLP SENTIMENT ENGINE (SAFE) ---
+# --- NLP SENTIMENT ENGINE ---
 def calculate_news_sentiment(news_items):
-    """Calculates cumulative sentiment score from news headlines."""
     if not HAS_NLP or not news_items: return pd.DataFrame()
     
     scores = []
     for news in news_items:
         try:
-            # Simple Polarity: -1.0 (Negative) to 1.0 (Positive)
-            blob = TextBlob(f"{news['title']} {news['title']}") # Weight title double
+            blob = TextBlob(f"{news['title']} {news['title']}") 
             score = blob.sentiment.polarity
-            
-            # Convert publishedAt to simple time order for plot
             scores.append({
                 "title": news['title'],
                 "score": score,
@@ -347,7 +349,6 @@ def calculate_news_sentiment(news_items):
     df = pd.DataFrame(scores)
     if df.empty: return pd.DataFrame()
     
-    # Create cumulative sentiment "Momentum"
     df = df.iloc[::-1].reset_index(drop=True) 
     df['cumulative'] = df['score'].cumsum()
     return df
@@ -640,9 +641,8 @@ def get_forex_factory_news(api_key, news_type='breaking'):
         return normalized_news
     except: return []
 
-# --- NEW: ECONOMIC CALENDAR WITH MOCK/DEMO SUPPORT ---
+# --- MOCK/DEMO SUPPORT ---
 def get_mock_calendar_data():
-    """Returns mock data formatted exactly how the app expects it for seamless testing."""
     return [
         {"currency": "USD", "impact": "High", "event_name": "[DEMO] Unemployment Claims", "actual": "210K", "forecast": "215K", "previous": "208K", "time": "8:30am"},
         {"currency": "USD", "impact": "High", "event_name": "[DEMO] Philly Fed Mfg Index", "actual": "15.5", "forecast": "8.0", "previous": "12.2", "time": "8:30am"},
@@ -652,13 +652,8 @@ def get_mock_calendar_data():
 
 @st.cache_data(ttl=21600)
 def get_economic_calendar(api_key, use_demo=False):
-    # 1. Check Demo Mode Flag
-    if use_demo:
-        return get_mock_calendar_data()
-
-    # 2. Check API Key
-    if not api_key: 
-        return get_mock_calendar_data() # Fallback if no key
+    if use_demo: return get_mock_calendar_data()
+    if not api_key: return get_mock_calendar_data() 
 
     st.session_state['rapid_calls'] += 1
     try:
@@ -668,10 +663,7 @@ def get_economic_calendar(api_key, use_demo=False):
         headers = {"x-rapidapi-host": "forex-factory-scraper1.p.rapidapi.com", "x-rapidapi-key": api_key}
         
         response = requests.get(url, headers=headers, params=querystring)
-        
-        # 3. Handle 429 Limit Logic (Quota Saver)
-        if response.status_code == 429:
-            return get_mock_calendar_data() # Fallback on limit reached
+        if response.status_code == 429: return get_mock_calendar_data() 
             
         data = response.json()
         raw_events = data if isinstance(data, list) else data.get('data', [])
@@ -682,9 +674,7 @@ def get_economic_calendar(api_key, use_demo=False):
                 filtered_events.append(e)
                 
         if filtered_events: return filtered_events
-    except: 
-        pass 
-    
+    except: pass 
     return []
 
 # --- TRADING LOGIC ---
@@ -756,22 +746,37 @@ def get_key_levels(daily_df):
         "R1": (2 * pivot) - low, "S1": (2 * pivot) - high
     }
 
+# --- FIX 2: SAFE CORRELATION ENGINE (Handles duplicates) ---
 @st.cache_data(ttl=3600)
 def get_correlations(base_ticker, api_key):
     try:
         tickers = {"Base": base_ticker, "VIX": "^VIX", "10Y Yield": "^TNX", "Gold": "GC=F"}
-        yf_data = safe_yf_download(list(tickers.values()), period="6mo", interval="1d")
+        # Download unique tickers only
+        unique_tickers = list(set(tickers.values()))
+        yf_data = safe_yf_download(unique_tickers, period="6mo", interval="1d")
         fred_data = get_fred_series("DTWEXAFEGS", api_key) 
         if yf_data.empty: return pd.Series()
         
-        if isinstance(yf_data.columns, pd.MultiIndex): yf_df = yf_data['Close'].copy()
-        elif 'Close' in yf_data.columns: yf_df = yf_data['Close'].copy()
-        else: yf_df = yf_data.copy()
-            
-        if isinstance(yf_df, pd.Series): yf_df = yf_df.to_frame(name=list(tickers.keys())[0])
-        found_cols = {c: k for k, v in tickers.items() if v in yf_df.columns}
-        yf_df.rename(columns=found_cols, inplace=True)
+        # Handle Close column extraction safely
+        if isinstance(yf_data.columns, pd.MultiIndex): 
+            # If MultiIndex, Close is likely a level
+            if 'Close' in yf_data.columns.get_level_values(0):
+                 yf_df = yf_data.xs('Close', axis=1, level=0)
+            else:
+                 yf_df = yf_data['Close'].copy()
+        elif 'Close' in yf_data.columns: 
+            yf_df = yf_data['Close'].copy()
+        else: 
+            yf_df = yf_data.copy()
+
+        if isinstance(yf_df, pd.Series): yf_df = yf_df.to_frame(name=unique_tickers[0])
+
+        # Rename Logic
+        for label, ticker in tickers.items():
+            if ticker in yf_df.columns:
+                yf_df.rename(columns={ticker: label}, inplace=True)
         
+        # Ensure Base exists (if it was overwritten by another key, we map it back)
         combined = yf_df
         if not fred_data.empty:
             fred_data = fred_data.rename(columns={'value': 'Dollar'})
@@ -780,10 +785,11 @@ def get_correlations(base_ticker, api_key):
             
         if combined.empty or 'Base' not in combined.columns: return pd.Series()
         corrs = combined.pct_change().rolling(20).corr(combined['Base'].pct_change()).iloc[-1]
-        return corrs.drop('Base') 
-    except: return pd.Series()
+        return corrs.drop('Base', errors='ignore') 
+    except Exception as e: 
+        return pd.Series()
 
-# --- NEW: COT QUANT ENGINE ---
+# --- COT QUANT ENGINE ---
 def clean_headers(df):
     if isinstance(df.columns[0], int):
         for i in range(20):
@@ -846,7 +852,7 @@ def fetch_cot_history(asset_name, start_year=2024):
         # Fallback Direct
         if df_year is None or df_year.empty:
             try:
-                url = f"https://www.cftc.gov/files/dea/history/deahistfo{y}.zip" # Default to Future Only
+                url = f"https://www.cftc.gov/files/dea/history/deahistfo{y}.zip" 
                 r = requests.get(url)
                 if r.status_code == 200:
                     with zipfile.ZipFile(io.BytesIO(r.content)) as z:
@@ -931,7 +937,6 @@ with st.sidebar:
     selected_asset = st.selectbox("SEC / Ticker", list(ASSETS.keys()))
     asset_info = ASSETS[selected_asset]
     
-    # --- UPDATED: QUOTA SAVER TOGGLE ---
     use_demo_data = st.checkbox("🛠️ USE DEMO DATA (Save Quota)", value=True, help="Use mock data for Calendar to save RapidAPI credits.")
     
     st.markdown("---")
@@ -976,11 +981,9 @@ st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <sp
 daily_data = get_daily_data(asset_info['ticker'])
 dxy_data = get_dxy_data()
 intraday_data = get_intraday_data(asset_info['ticker'])
-
-# --- UPDATED: FETCH CALENDAR WITH TOGGLE ---
 eco_events = get_economic_calendar(rapid_key, use_demo=use_demo_data)
 
-# Fetch News from BOTH sources
+# Fetch News
 news_general = get_financial_news_general(news_key, query=asset_info.get('news_query', 'Finance'))
 news_ff = get_forex_factory_news(rapid_key, 'breaking')
 combined_news_for_llm = news_general[:5] + news_ff[:5]
@@ -991,10 +994,12 @@ gex_df, gex_date, gex_spot, current_iv = get_gex_profile(asset_info['opt_ticker'
 vol_profile, poc_price = calculate_volume_profile(intraday_data)
 hurst = calculate_hurst(daily_data['Close'].values) if not daily_data.empty else 0.5
 regime_data = get_market_regime(asset_info['ticker'])
-# OLD COT FETCH REMOVED -> REPLACED BY SECTION 8 LOGIC
 tech_radar = calculate_technical_radar(daily_data)
 correlations = get_correlations(asset_info['ticker'], fred_key)
 news_sentiment_df = calculate_news_sentiment(combined_news_for_llm)
+
+# Initialize COT Data for AI (prevents scope crash)
+cot_data = None 
 
 # --- 1. OVERVIEW ---
 if not daily_data.empty:
@@ -1120,7 +1125,7 @@ if tech_radar:
         </div>
         """, unsafe_allow_html=True)
 
-# --- 1C. RESTORED: COINGECKO INTEGRATION ---
+# --- 1C. COINGECKO INTEGRATION ---
 cg_id = asset_info.get('cg_id')
 if cg_id and cg_key:
     st.markdown("---")
@@ -1205,7 +1210,6 @@ st.markdown("---")
 col_eco, col_news = st.columns([2, 1])
 with col_eco:
     st.markdown("### 📅 ECONOMIC EVENTS (USD)")
-    # Check if we are in demo mode for UI feedback
     if use_demo_data:
         st.caption("🟢 USING DEMO DATA (API Quota Saver Active)")
     
@@ -1222,10 +1226,10 @@ with col_eco:
             elif 'Mean' in val: color = '#cccc00'
             return f'color: {color}'
         if not df_cal.empty: 
-            st.dataframe(df_cal.style.map(color_bias, subset=['BIAS']), use_container_width=True, hide_index=True)
+            # FIX 3: Use applymap for broad compatibility
+            st.dataframe(df_cal.style.applymap(color_bias, subset=['BIAS']), use_container_width=True, hide_index=True)
     else: st.info("NO HIGH IMPACT USD EVENTS SCHEDULED.")
 with col_news:
-    # --- NEW: SENTIMENT CHART ---
     st.markdown(f"### 📰 {asset_info.get('news_query', 'LATEST')} WIRE & SENTIMENT")
     
     if HAS_NLP and not news_sentiment_df.empty:
@@ -1264,7 +1268,7 @@ with col_news:
     with tab_gen: render_news(news_general)
     with tab_ff: render_news(news_ff)
 
-# --- NEW: FRED MACRO DASHBOARD ---
+# --- FRED MACRO DASHBOARD ---
 st.markdown("---")
 st.markdown("### 🇺🇸 FED LIQUIDITY & MACRO (FRED)")
 macro_context_data = {} 
@@ -1439,7 +1443,6 @@ if gex_df is not None and gex_spot is not None:
         </div>
         """, unsafe_allow_html=True)
     
-    # --- NEW: VOLATILITY DASHBOARD ---
     with g3:
         # Calculate HV (20D Annualized)
         if not daily_data.empty:
@@ -1504,7 +1507,7 @@ if pred_dates is not None and pred_paths is not None:
     terminal_chart_layout(fig_pred, title="MONTE CARLO PROJECTION (126 Days)", height=400)
     st.plotly_chart(fig_pred, use_container_width=True)
 
-# --- 8. COT QUANT TERMINAL (V5.17 UPGRADE) ---
+# --- 8. COT QUANT TERMINAL ---
 st.markdown("---")
 st.markdown("### 🏛️ COT QUANT TERMINAL")
 
@@ -1547,7 +1550,15 @@ if cot_history is not None and not cot_history.empty:
         c_cot4.metric("Report Date", latest_cot['date'].strftime('%Y-%m-%d'))
         
         # 4. AI Interpretation Box
-        st.info(generate_cot_analysis(latest_cot['Net Speculator'], latest_cot['Net Hedger'], spec_label, hedge_label))
+        cot_analysis_txt = generate_cot_analysis(latest_cot['Net Speculator'], latest_cot['Net Hedger'], spec_label, hedge_label)
+        st.info(cot_analysis_txt)
+        
+        # FIX 4: DEFINE COT DATA FOR AI ENGINE
+        cot_data = {
+            "sentiment": "BULLISH" if latest_cot['Net Speculator'] > 0 else "BEARISH",
+            "net_spec": latest_cot['Net Speculator'],
+            "z_score": z_val
+        }
         
         # 5. VISUALIZATION TABS
         tab_trend, tab_struct, tab_osc = st.tabs(["📈 NET TREND", "🦋 LONG/SHORT STRUCTURE", "📊 Z-SCORE OSCILLATOR"])
@@ -1609,7 +1620,7 @@ if gemini_key:
             with st.spinner("Analyzing Technicals + Macro..."):
                 narrative = get_technical_narrative(
                     ticker=selected_asset, price=curr, daily_pct=pct, regime=regime_data,
-                    ml_signal=ml_signal_str, gex_data=gex_summary, cot_data=cot_data if 'cot_data' in locals() else None,
+                    ml_signal=ml_signal_str, gex_data=gex_summary, cot_data=cot_data,
                     levels=key_levels, macro_data=macro_context_data, api_key=gemini_key
                 )
                 st.session_state['narrative_cache'] = narrative
@@ -1632,7 +1643,7 @@ if gemini_key:
             with st.spinner("Analyzing Macro, Gamma, and Order Flow..."):
                 thesis_text = generate_deep_dive_thesis(
                     ticker=selected_asset, price=curr, change=pct, regime=regime_data,
-                    ml_signal=ml_signal_str, gex_data=gex_summary, cot_data=cot_data if 'cot_data' in locals() else None,
+                    ml_signal=ml_signal_str, gex_data=gex_summary, cot_data=cot_data,
                     levels=key_levels, news_summary=news_text_summary, macro_data=macro_context_data, api_key=gemini_key
                 )
                 st.session_state['thesis_cache'] = thesis_text
