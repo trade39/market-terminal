@@ -9,6 +9,136 @@ from datetime import datetime
 from utils import safe_yf_download
 from data_engine import get_fred_series
 
+# --- 1. ADVANCED VOLATILITY MODELING ---
+def calculate_garman_klass_vol(df, window=20, trading_periods=252):
+    """
+    Garman-Klass Volatility: More efficient than Close-to-Close volatility 
+    as it considers High, Low, Open, and Close.
+    """
+    try:
+        log_hl = np.log(df['High'] / df['Low']) ** 2
+        log_co = np.log(df['Close'] / df['Open']) ** 2
+        var = 0.5 * log_hl - (2 * np.log(2) - 1) * log_co
+        return np.sqrt(var.rolling(window=window).mean() * trading_periods)
+    except: return pd.Series(dtype=float)
+
+def get_volatility_cone(df, windows=[5, 20, 60]):
+    """Calculates volatility percentiles to identify if current vol is cheap/expensive."""
+    if df.empty: return {}
+    res = {}
+    current_vol = calculate_garman_klass_vol(df).iloc[-1]
+    
+    # Calculate historical quantile cones
+    for w in windows:
+        hist_vol = calculate_garman_klass_vol(df, window=w)
+        res[f'min_{w}'] = hist_vol.min()
+        res[f'max_{w}'] = hist_vol.max()
+        res[f'med_{w}'] = hist_vol.median()
+        res[f'curr_{w}'] = hist_vol.iloc[-1]
+    
+    # Statistical Regime
+    rank = (current_vol - res['min_20']) / (res['max_20'] - res['min_20'])
+    regime = "COMPRESSED (Breakout Soon)" if rank < 0.2 else "EXPANDED (Mean Revert)" if rank > 0.8 else "NORMAL"
+    return {"data": res, "regime": regime, "rank": rank}
+
+# --- 2. MARKET STRUCTURE & LIQUIDITY ---
+def detect_market_structure(df, window=5):
+    """
+    Identifies Swing Highs (SH) and Swing Lows (SL) to map structure.
+    Returns the dataframe with 'Structure' column.
+    """
+    df = df.copy()
+    df['Swing_High'] = df['High'].rolling(window=window*2+1, center=True).max() == df['High']
+    df['Swing_Low'] = df['Low'].rolling(window=window*2+1, center=True).min() == df['Low']
+    
+    structure = []
+    last_high = df['High'].iloc[0]
+    last_low = df['Low'].iloc[0]
+    
+    for i in range(len(df)):
+        if df['Swing_High'].iloc[i]:
+            structure.append("SH") # Swing High
+            last_high = df['High'].iloc[i]
+        elif df['Swing_Low'].iloc[i]:
+            structure.append("SL") # Swing Low
+            last_low = df['Low'].iloc[i]
+        else:
+            structure.append(np.nan)
+            
+    df['Structure'] = structure
+    
+    # Determine Trend
+    # If Price > Last Swing High -> Bullish BOS (Break of Structure)
+    # If Price < Last Swing Low -> Bearish BOS
+    current_close = df['Close'].iloc[-1]
+    
+    # Find last confirmed points
+    try:
+        last_sh = df[df['Swing_High']]['High'].iloc[-1]
+        last_sl = df[df['Swing_Low']]['Low'].iloc[-1]
+        
+        trend = "NEUTRAL"
+        if current_close > last_sh: trend = "BULLISH (BOS)"
+        elif current_close < last_sl: trend = "BEARISH (BOS)"
+        else: trend = "CONSOLIDATION (Internal Range)"
+        
+        return df, trend, last_sh, last_sl
+    except:
+        return df, "UNCERTAIN", 0, 0
+
+def detect_fair_value_gaps(df):
+    """
+    Identifies Fair Value Gaps (FVG) / Imbalances.
+    Bullish FVG: Candle 1 High < Candle 3 Low
+    Bearish FVG: Candle 1 Low > Candle 3 High
+    """
+    fvgs = []
+    # Loop through last 50 candles
+    lookback = 50
+    subset = df.iloc[-lookback:]
+    
+    for i in range(len(subset) - 2):
+        # Bullish FVG
+        if subset['Low'].iloc[i+2] > subset['High'].iloc[i]:
+            fvgs.append({
+                "type": "Bullish FVG",
+                "top": subset['Low'].iloc[i+2],
+                "bottom": subset['High'].iloc[i],
+                "date": subset.index[i+1]
+            })
+        # Bearish FVG
+        elif subset['High'].iloc[i+2] < subset['Low'].iloc[i]:
+             fvgs.append({
+                "type": "Bearish FVG",
+                "top": subset['Low'].iloc[i],
+                "bottom": subset['High'].iloc[i+2],
+                "date": subset.index[i+1]
+            })
+            
+    # Filter only unmitigated (active) FVGs could be complex, 
+    # returning last 3 significant ones for display
+    return fvgs[-3:] if fvgs else []
+
+# --- 3. ORDER FLOW & STATS ---
+def calculate_order_flow_proxy(df):
+    """
+    Approximates Buying vs Selling pressure using High-Low position relative to Close.
+    (Money Flow approximation).
+    """
+    df['MF_Multiplier'] = ((df['Close'] - df['Low']) - (df['High'] - df['Close'])) / (df['High'] - df['Low'])
+    df['MF_Vol'] = df['MF_Multiplier'] * df['Volume']
+    
+    # Cumulative Volume Delta (Proxy)
+    df['CVD'] = df['MF_Vol'].cumsum()
+    
+    # Flow Sentiment (Last 5 periods)
+    recent_flow = df['MF_Vol'].tail(5).sum()
+    bias = "Aggressive Buying" if recent_flow > 0 else "Aggressive Selling"
+    
+    return df, bias
+
+# --- RETAINING ORIGINAL FEATURES (DO NOT REMOVE) ---
+
 # --- MATH ---
 def calculate_hurst(series, lags=range(2, 20)):
     try:
@@ -141,7 +271,6 @@ def get_gex_profile(opt_ticker):
         return df, target_exp, spot_price, avg_iv
     except: return None, None, None, None
 
-# --- TECHNICALS & SIMULATION ---
 def calculate_volume_profile(df, bins=50):
     if df.empty: return None, None
     price_range = df['High'].max() - df['Low'].min()
@@ -238,13 +367,10 @@ def get_correlations(base_ticker, api_key):
         unique_tickers = list(set(tickers.values()))
         yf_data = safe_yf_download(unique_tickers, period="6mo", interval="1d")
         
-        # CRITICAL FIX: Fetch DXY from FRED using DTWEXAFEGS
-        # Trade Weighted U.S. Dollar Index: Advanced Foreign Economies, Goods and Services
         fred_data = get_fred_series("DTWEXAFEGS", api_key) 
         
         if yf_data.empty: return pd.Series()
         
-        # Handle Close column extraction safely
         if isinstance(yf_data.columns, pd.MultiIndex): 
             if 'Close' in yf_data.columns.get_level_values(0):
                  yf_df = yf_data.xs('Close', axis=1, level=0)
@@ -264,17 +390,12 @@ def get_correlations(base_ticker, api_key):
         combined = yf_df
         if not fred_data.empty:
             fred_data = fred_data.rename(columns={'value': 'Dollar'})
-            
-            # CRITICAL FIX: Ensure BOTH indices are naive before merging
             if yf_df.index.tz is not None: yf_df.index = yf_df.index.tz_localize(None)
             if fred_data.index.tz is not None: fred_data.index = fred_data.index.tz_localize(None)
-            
-            # Join and forward fill FRED data to match YF frequency
             combined = pd.concat([yf_df, fred_data], axis=1).ffill().dropna()
             
         if combined.empty or 'Base' not in combined.columns: return pd.Series()
         
-        # Rolling correlation
         corrs = combined.pct_change().rolling(20).corr(combined['Base'].pct_change()).iloc[-1]
         return corrs.drop('Base', errors='ignore') 
     except Exception as e: 
