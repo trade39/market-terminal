@@ -80,3 +80,4 @@ CSS_STYLE = """
     /* API Limit Progress Bars */
     .stProgress > div > div > div > div { background-color: #ff9900; }
 </style>
+"""
