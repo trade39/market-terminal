@@ -11,7 +11,7 @@ import quant_engine as qe
 import ai_engine as ai
 
 # --- APP CONFIGURATION ---
-st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V5.20", page_icon="⚡")
+st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V5.21", page_icon="⚡")
 st.markdown(config.CSS_STYLE, unsafe_allow_html=True)
 
 # --- SESSION STATE INITIALIZATION ---
@@ -25,7 +25,7 @@ if 'thesis_cache' not in st.session_state: st.session_state['thesis_cache'] = No
 
 # --- SIDEBAR ---
 with st.sidebar:
-    st.markdown("<h3 style='color: #ff9900;'>COMMAND LINE</h3>", unsafe_allow_html=True)
+    st.markdown("<h3 style='color: #00FFFF;'>COMMAND LINE</h3>", unsafe_allow_html=True)
     selected_asset = st.selectbox("SEC / Ticker", list(config.ASSETS.keys()))
     asset_info = config.ASSETS[selected_asset]
     
@@ -34,7 +34,7 @@ with st.sidebar:
     st.markdown("---")
     
     with st.expander("📡 API QUOTA MONITOR", expanded=True):
-        st.markdown("<div style='font-size:0.7em; color:gray;'>Session Usage vs Hard Limits</div>", unsafe_allow_html=True)
+        st.markdown("<div style='font-size:0.7em; color:#AAAAAA;'>Session Usage vs Hard Limits</div>", unsafe_allow_html=True)
         st.write(f"**NewsAPI** ({st.session_state['news_calls']} / 100)")
         st.progress(min(st.session_state['news_calls'] / 100, 1.0))
         st.write(f"**Gemini AI** ({st.session_state['gemini_calls']} / 20)")
@@ -67,7 +67,7 @@ with st.sidebar:
         st.rerun()
 
 # --- MAIN DASHBOARD ---
-st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V5.20</span></h1>", unsafe_allow_html=True)
+st.markdown(f"<h1 style='border-bottom: 2px solid #00FFFF;'>{selected_asset} <span style='font-size:0.5em; color:#AAAAAA;'>TERMINAL PRO V5.21</span></h1>", unsafe_allow_html=True)
 
 # Fetch Data
 daily_data = de.get_daily_data(asset_info['ticker'])
@@ -89,7 +89,7 @@ regime_data = qe.get_market_regime(asset_info['ticker'])
 correlations = qe.get_correlations(asset_info['ticker'], fred_key)
 news_sentiment_df = ai.calculate_news_sentiment(combined_news_for_llm)
 
-# NEW: Multilayer Engines
+# Multilayer Engines
 ms_df, ms_trend, ms_last_sh, ms_last_sl = qe.detect_market_structure(daily_data)
 vol_cone = qe.get_volatility_cone(daily_data)
 of_df, of_bias = qe.calculate_order_flow_proxy(daily_data)
@@ -113,19 +113,19 @@ if not daily_data.empty:
     
     c2.markdown(f"""
     <div class='terminal-box' style="text-align:center; padding:5px;">
-        <div style="font-size:0.8em; color:#ff9900;">AI PREDICTION</div>
+        <div style="font-size:0.8em; color:#00FFFF;">AI PREDICTION</div>
         <span class='{ml_color}'>{ml_bias}</span>
-        <div style="font-size:0.8em; margin-top:5px; color:#aaa;">CONF: {ml_conf:.0f}%</div>
+        <div style="font-size:0.8em; margin-top:5px; color:#AAAAAA;">CONF: {ml_conf:.0f}%</div>
     </div>
     """, unsafe_allow_html=True)
     
     hurst_type = "TRENDING" if hurst > 0.55 else "MEAN REVERT" if hurst < 0.45 else "RANDOM WALK"
-    h_color = "#00ff00" if hurst > 0.55 else "#ff3333" if hurst < 0.45 else "gray"
+    h_color = "#00FFFF" if hurst > 0.55 else "#8080FF" if hurst < 0.45 else "gray"
     
     if regime_data:
         c3.markdown(f"""
         <div class='terminal-box' style="padding:10px;">
-            <div style="font-size:0.8em; color:#ff9900;">QUANT REGIME</div>
+            <div style="font-size:0.8em; color:#00FFFF;">QUANT REGIME</div>
             <div style="font-size:1.1em; font-weight:bold;" class='{regime_data['color']}'>{regime_data['regime']}</div>
             <div style="font-size:0.7em; display:flex; justify-content:space-between; margin-top:5px;">
                 <span>FRACTAL:</span>
@@ -138,22 +138,25 @@ if not daily_data.empty:
     
     c4.metric("HIGH/LOW", f"{high.max():,.2f} / {low.min():,.2f}")
     
-    # --- CHART: MULTILAYER LIQUIDITY MAP ---
+    # --- CHART: MULTILAYER LIQUIDITY MAP (CYAN/BLUE THEME) ---
     fig = go.Figure()
     
-    # Trace 1: Asset Candlesticks
+    # Trace 1: Asset Candlesticks (Custom Cyan/Blue Colors)
     fig.add_trace(go.Candlestick(
         x=daily_data.index, 
         open=daily_data['Open'], 
         high=high, 
         low=low, 
         close=close, 
-        name="Price"
+        name="Price",
+        increasing_line_color="#00FFFF", # Cyan for Up
+        decreasing_line_color="#405060"  # Muted Blue-Gray for Down
     ))
     
     # Trace 2: Fair Value Gaps (Rectangles)
     for fvg in active_fvgs:
-        color = "rgba(0, 255, 0, 0.2)" if "Bullish" in fvg['type'] else "rgba(255, 0, 0, 0.2)"
+        # Bullish FVG = Translucent Cyan, Bearish FVG = Translucent Muted Blue
+        color = "rgba(0, 255, 255, 0.15)" if "Bullish" in fvg['type'] else "rgba(128, 128, 255, 0.15)"
         fig.add_shape(type="rect",
             x0=fvg['date'], x1=daily_data.index[-1],
             y0=fvg['bottom'], y1=fvg['top'],
@@ -165,15 +168,15 @@ if not daily_data.empty:
     sl_mask = ms_df['Structure'] == 'SL'
     fig.add_trace(go.Scatter(
         x=ms_df[sh_mask].index, y=ms_df[sh_mask]['High'], 
-        mode='markers', marker=dict(symbol='triangle-down', size=8, color='red'), name='Swing High'
+        mode='markers', marker=dict(symbol='triangle-down', size=8, color='#8080FF'), name='Swing High'
     ))
     fig.add_trace(go.Scatter(
         x=ms_df[sl_mask].index, y=ms_df[sl_mask]['Low'], 
-        mode='markers', marker=dict(symbol='triangle-up', size=8, color='green'), name='Swing Low'
+        mode='markers', marker=dict(symbol='triangle-up', size=8, color='#00FFFF'), name='Swing Low'
     ))
 
     if poc_price:
-        fig.add_hline(y=poc_price, line_dash="dash", line_color="yellow", annotation_text="POC", annotation_position="bottom right")
+        fig.add_hline(y=poc_price, line_dash="dash", line_color="#CCCCCC", annotation_text="POC", annotation_position="bottom right")
 
     # Trace 4: DXY Overlay (FRED)
     if not dxy_data.empty:
@@ -182,60 +185,54 @@ if not daily_data.empty:
             x=dxy_aligned.index, 
             y=dxy_aligned.values, 
             name="DXY (FRED)", 
-            line=dict(color='orange', width=2),
+            line=dict(color='#8080FF', width=2), # Mid-tone Blue
             opacity=0.7,
             yaxis="y2"
         ))
 
-    # Layout Updates
+    # Layout Updates (Using Utils helper)
+    fig = terminal_chart_layout(fig, height=500)
     fig.update_layout(
-        template="plotly_dark",
-        paper_bgcolor="#000000",
-        plot_bgcolor="#000000",
-        height=500,
-        margin=dict(l=40, r=40, t=40, b=40),
-        xaxis=dict(showgrid=True, gridcolor="#222", zerolinecolor="#222"),
-        yaxis=dict(showgrid=True, gridcolor="#222", zerolinecolor="#222", title="Asset Price"),
+        yaxis=dict(title="Asset Price"),
         yaxis2=dict(
-            title="DXY Index (FRED)",
+            title="DXY Index",
             overlaying="y",
             side="right",
             showgrid=False,
-            title_font=dict(color="orange"),
-            tickfont=dict(color="orange")
+            title_font=dict(color="#8080FF"),
+            tickfont=dict(color="#8080FF")
         ),
-        font=dict(family="Courier New", color="#e0e0e0"),
         legend=dict(orientation="h", y=1.02, x=0, bgcolor="rgba(0,0,0,0)")
     )
     
     fig.update_xaxes(rangeslider_visible=False)
     st.plotly_chart(fig, use_container_width=True)
 
-# --- 1B. QUANT MULTILAYER SETUP (REPLACES RETAIL RADAR) ---
+# --- 1B. QUANT MULTILAYER SETUP ---
 st.markdown("---")
 st.markdown("### 🧬 QUANT MULTILAYER SETUP")
 
 ms_col, vol_col, of_col = st.columns(3)
 
 with ms_col:
+    # Use Cyan for Bullish/Structure, Muted for Bearish
     trend_color = "bullish" if "BULLISH" in ms_trend else "bearish" if "BEARISH" in ms_trend else "neutral"
     st.markdown(f"""
     <div class='terminal-box'>
-        <div style='color:gray; font-size:0.8em;'>MARKET STRUCTURE (BOS/CHoCH)</div>
+        <div style='color:#AAAAAA; font-size:0.8em;'>MARKET STRUCTURE (BOS/CHoCH)</div>
         <div style='font-size:1.2em; font-weight:bold;'>{ms_trend}</div>
         <hr style='margin:5px 0;'>
-        <div style='font-size:0.8em;'>Last Swing High: <span style='color:#ff3333'>{ms_last_sh:,.2f}</span></div>
-        <div style='font-size:0.8em;'>Last Swing Low: <span style='color:#00ff00'>{ms_last_sl:,.2f}</span></div>
+        <div style='font-size:0.8em;'>Last Swing High: <span style='color:#8080FF'>{ms_last_sh:,.2f}</span></div>
+        <div style='font-size:0.8em;'>Last Swing Low: <span style='color:#00FFFF'>{ms_last_sl:,.2f}</span></div>
     </div>
     """, unsafe_allow_html=True)
 
 with vol_col:
     vol_regime = vol_cone.get('regime', 'N/A')
     vol_rank = vol_cone.get('rank', 0.5)
-    v_color = "bullish" if "COMPRESSED" in vol_regime else "neutral"
     st.markdown(f"""
     <div class='terminal-box'>
-        <div style='color:gray; font-size:0.8em;'>VOLATILITY SURFACE (Garman-Klass)</div>
+        <div style='color:#AAAAAA; font-size:0.8em;'>VOLATILITY SURFACE (Garman-Klass)</div>
         <div style='font-size:1.1em; font-weight:bold;'>{vol_regime}</div>
         <hr style='margin:5px 0;'>
         <div style='font-size:0.8em;'>Percentile Rank: {vol_rank*100:.0f}%</div>
@@ -247,7 +244,7 @@ with of_col:
     of_color = "bullish" if "Buying" in of_bias else "bearish"
     st.markdown(f"""
     <div class='terminal-box'>
-        <div style='color:gray; font-size:0.8em;'>ORDER FLOW PROXY (Pressure)</div>
+        <div style='color:#AAAAAA; font-size:0.8em;'>ORDER FLOW PROXY (Pressure)</div>
         <div style='font-size:1.2em; font-weight:bold;' class='{of_color}'>{of_bias}</div>
         <hr style='margin:5px 0;'>
         <div style='font-size:0.8em;'>Vol-Weighted Impulse logic</div>
@@ -268,19 +265,20 @@ if cg_id and cg_key:
         c_cg1, c_cg2, c_cg3, c_cg4 = st.columns(4)
         c_cg1.metric("Market Rank", f"#{cg_data['rank']}")
         
-        ath_color = "red" if cg_data['ath_change'] < -20 else "orange"
+        # Color Logic: Cyan for Good, Muted Blue for Bad
+        ath_color = "#8080FF" if cg_data['ath_change'] < -20 else "#00FFFF"
         c_cg2.markdown(f"""
         <div class='terminal-box'>
-            <div style='font-size:0.8em; color:gray;'>ATH DRAWDOWN</div>
+            <div style='font-size:0.8em; color:#AAAAAA;'>ATH DRAWDOWN</div>
             <div style='color:{ath_color}; font-size:1.2em;'>{cg_data['ath_change']:.2f}%</div>
             <div style='font-size:0.7em;'>High: ${cg_data['ath']:,.0f}</div>
         </div>
         """, unsafe_allow_html=True)
         sent_val = cg_data['sentiment']
-        sent_color = "#00ff00" if sent_val > 60 else "#ff3333" if sent_val < 40 else "gray"
+        sent_color = "#00FFFF" if sent_val > 60 else "#8080FF" if sent_val < 40 else "gray"
         c_cg3.markdown(f"""
         <div class='terminal-box'>
-            <div style='font-size:0.8em; color:gray;'>COMMUNITY SENTIMENT</div>
+            <div style='font-size:0.8em; color:#AAAAAA;'>COMMUNITY SENTIMENT</div>
             <div style='color:{sent_color}; font-size:1.2em;'>{sent_val}% Bullish</div>
             <progress value="{sent_val}" max="100" style="width:100%; height:5px;"></progress>
         </div>
@@ -288,7 +286,7 @@ if cg_id and cg_key:
         
         c_cg4.markdown(f"""
         <div class='terminal-box'>
-            <div style='font-size:0.8em; color:gray;'>ALGORITHM</div>
+            <div style='font-size:0.8em; color:#AAAAAA;'>ALGORITHM</div>
             <div style='color:white; font-size:1em;'>{cg_data['hashing']}</div>
         </div>
         """, unsafe_allow_html=True)
@@ -307,13 +305,19 @@ col_intra_1, col_intra_2 = st.columns([2, 1])
 with col_intra_1:
     if not rs_data.empty:
         curr_rs = rs_data['RS_Score'].iloc[-1]
-        rs_color = "#00ff00" if curr_rs > 0 else "#ff3333"
+        rs_color = "#00FFFF" if curr_rs > 0 else "#8080FF"
         rs_text = "OUTPERFORMING SPY" if curr_rs > 0 else "UNDERPERFORMING SPY"
         st.markdown(f"**RELATIVE STRENGTH (vs SPY)**: <span style='color:{rs_color}'>{rs_text}</span>", unsafe_allow_html=True)
         fig_rs = go.Figure()
         fig_rs.add_hline(y=0, line_color="#333", line_dash="dash")
-        fig_rs.add_trace(go.Scatter(x=rs_data.index, y=rs_data['RS_Score'], mode='lines', name='Alpha', line=dict(color=rs_color, width=2), fill='tozeroy'))
-        terminal_chart_layout(fig_rs, title="INTRADAY ALPHA (Real-Time)", height=250)
+        # Line Fill: Translucent lighter blue (#66CCFF with opacity)
+        fig_rs.add_trace(go.Scatter(
+            x=rs_data.index, y=rs_data['RS_Score'], 
+            mode='lines', name='Alpha', 
+            line=dict(color=rs_color, width=2), 
+            fill='tozeroy', fillcolor='rgba(102, 204, 255, 0.2)'
+        ))
+        fig_rs = terminal_chart_layout(fig_rs, title="INTRADAY ALPHA (Real-Time)", height=250)
         st.plotly_chart(fig_rs, use_container_width=True)
 with col_intra_2:
     st.markdown("**🔑 KEY ALGO LEVELS**")
@@ -322,15 +326,15 @@ with col_intra_2:
         def get_lvl_color(level, current):
             if current == 0: return "white"
             dist = abs(level - current) / current
-            if dist < 0.002: return "#ffff00" # Near
-            if level > current: return "#ff3333" # Resistance
-            return "#00ff00" # Support
+            if dist < 0.002: return "#FFFF00" # Near (Keep Yellow for Attention)
+            if level > current: return "#8080FF" # Resistance (Muted Blue)
+            return "#00FFFF" # Support (Cyan)
         levels_list = [("R1 (Resist)", key_levels['R1']), ("PDH (High)", key_levels['PDH']), ("PIVOT (Daily)", key_levels['Pivot']), ("PDL (Low)", key_levels['PDL']), ("S1 (Support)", key_levels['S1'])]
         for name, price in levels_list:
             c_code = get_lvl_color(price, cur_price)
             st.markdown(f"""
-            <div style="display:flex; justify-content:space-between; border-bottom:1px solid #222; padding:5px;">
-                <span style="color:#aaa;">{name}</span>
+            <div style="display:flex; justify-content:space-between; border-bottom:1px solid #333; padding:5px;">
+                <span style="color:#AAAAAA;">{name}</span>
                 <span style="color:{c_code}; font-family:monospace;">{price:,.2f}</span>
             </div>
             """, unsafe_allow_html=True)
@@ -388,10 +392,9 @@ with col_eco:
             cal_data.append({"TIME": event.get('time', 'N/A'), "EVENT": event.get('event_name', 'Unknown'), "DATA CONTEXT": context, "BIAS": bias})
         df_cal = pd.DataFrame(cal_data)
         def color_bias(val):
-            color = 'white'
-            if 'Bullish' in val: color = '#00ff00' 
-            elif 'Bearish' in val: color = '#ff3333'
-            elif 'Mean' in val: color = '#cccc00'
+            color = '#CCCCCC'
+            if 'Bullish' in val: color = '#00FFFF' 
+            elif 'Bearish' in val: color = '#8080FF'
             return f'color: {color}'
         if not df_cal.empty: 
             st.dataframe(df_cal.style.applymap(color_bias, subset=['BIAS']), use_container_width=True, hide_index=True)
@@ -405,18 +408,11 @@ with col_news:
              x=news_sentiment_df.index, 
              y=news_sentiment_df['cumulative'],
              mode='lines+markers',
-             line=dict(color='#00e6ff', width=2, shape='spline'),
+             line=dict(color='#00FFFF', width=2, shape='spline'),
              name="Sentiment"
          ))
-         fig_sent.update_layout(
-             title="NLP SENTIMENT VELOCITY (Current Batch)",
-             height=150,
-             margin=dict(l=10, r=10, t=30, b=10),
-             paper_bgcolor="#111", plot_bgcolor="#111",
-             font=dict(size=10, color="white"),
-             xaxis=dict(showgrid=False, visible=False),
-             yaxis=dict(showgrid=True, gridcolor="#333")
-         )
+         fig_sent = terminal_chart_layout(fig_sent, title="NLP SENTIMENT VELOCITY", height=150)
+         fig_sent.update_layout(xaxis=dict(showgrid=False, visible=False))
          st.plotly_chart(fig_sent, use_container_width=True)
     elif not ai.HAS_NLP:
         st.warning("Install `textblob` to enable Sentiment Analysis.")
@@ -428,7 +424,7 @@ with col_news:
                 st.markdown(f"""
                 <div style="border-bottom:1px solid #333; padding-bottom:5px; margin-bottom:5px;">
                     <a class='news-link' href='{news['url']}' target='_blank'>▶ {news['title']}</a><br>
-                    <span style='font-size:0.7em; color:gray;'>{news['time']} | {news['source']}</span>
+                    <span style='font-size:0.7em; color:#AAAAAA;'>{news['time']} | {news['source']}</span>
                 </div>
                 """, unsafe_allow_html=True)
         else: st.markdown("<div style='color:gray;'>No data.</div>", unsafe_allow_html=True)
@@ -467,11 +463,11 @@ if fred_key:
                 # Yield Curve
                 if not df_yield.empty:
                     curr_yield = df_yield['value'].iloc[-1]
-                    yield_color = "red" if curr_yield < 0 else "green"
+                    yield_color = "#8080FF" if curr_yield < 0 else "#00FFFF"
                     fig_yc = go.Figure()
-                    fig_yc.add_trace(go.Scatter(x=df_yield.index, y=df_yield['value'], fill='tozeroy', line=dict(color=yield_color)))
+                    fig_yc.add_trace(go.Scatter(x=df_yield.index, y=df_yield['value'], fill='tozeroy', fillcolor='rgba(102, 204, 255, 0.2)', line=dict(color=yield_color)))
                     fig_yc.add_hline(y=0, line_dash="dash", line_color="white")
-                    terminal_chart_layout(fig_yc, title=f"10Y-2Y SPREAD: {curr_yield:.2f}%", height=250)
+                    fig_yc = terminal_chart_layout(fig_yc, title=f"10Y-2Y SPREAD: {curr_yield:.2f}%", height=250)
                     st.plotly_chart(fig_yc, use_container_width=True)
                     yc_msg = "⚠️ INVERTED: RECESSION SIGNAL ALERT" if curr_yield < 0 else "NORMAL: GROWTH EXPECTATIONS"
                     st.caption(f"CONTEXT: {yc_msg}")
@@ -480,8 +476,8 @@ if fred_key:
                 # Fed Funds
                 if not df_ff.empty:
                     fig_ff = go.Figure()
-                    fig_ff.add_trace(go.Scatter(x=df_ff.index, y=df_ff['value'], line=dict(color="#00e6ff")))
-                    terminal_chart_layout(fig_ff, title=f"FED FUNDS RATE: {df_ff['value'].iloc[-1]:.2f}%", height=250)
+                    fig_ff.add_trace(go.Scatter(x=df_ff.index, y=df_ff['value'], line=dict(color="#40E0FF")))
+                    fig_ff = terminal_chart_layout(fig_ff, title=f"FED FUNDS RATE: {df_ff['value'].iloc[-1]:.2f}%", height=250)
                     st.plotly_chart(fig_ff, use_container_width=True)
                     st.caption("CONTEXT: BASELINE RISK-FREE RATE (Cost of Capital)")
         with macro_tab2:
@@ -491,8 +487,8 @@ if fred_key:
                 if not df_cpi.empty:
                     df_cpi['YoY'] = df_cpi['value'].pct_change(12) * 100
                     fig_cpi = go.Figure()
-                    fig_cpi.add_trace(go.Bar(x=df_cpi.index, y=df_cpi['YoY'], marker_color='#ff9900'))
-                    terminal_chart_layout(fig_cpi, title=f"CPI INFLATION (YoY): {df_cpi['YoY'].iloc[-1]:.2f}%", height=250)
+                    fig_cpi.add_trace(go.Bar(x=df_cpi.index, y=df_cpi['YoY'], marker_color='#00FFFF'))
+                    fig_cpi = terminal_chart_layout(fig_cpi, title=f"CPI INFLATION (YoY): {df_cpi['YoY'].iloc[-1]:.2f}%", height=250)
                     st.plotly_chart(fig_cpi, use_container_width=True)
                     cpi_trend = "RISING" if df_cpi['YoY'].iloc[-1] > df_cpi['YoY'].iloc[-2] else "FALLING"
                     st.caption(f"CONTEXT: INFLATION IS {cpi_trend} (Target: 2.0%)")
@@ -501,8 +497,8 @@ if fred_key:
                 # M2
                 if not df_m2.empty:
                     fig_m2 = go.Figure()
-                    fig_m2.add_trace(go.Scatter(x=df_m2.index, y=df_m2['value'], line=dict(color="#00ff00")))
-                    terminal_chart_layout(fig_m2, title="M2 MONEY SUPPLY (Liquidity)", height=250)
+                    fig_m2.add_trace(go.Scatter(x=df_m2.index, y=df_m2['value'], line=dict(color="#00FFFF")))
+                    fig_m2 = terminal_chart_layout(fig_m2, title="M2 MONEY SUPPLY (Liquidity)", height=250)
                     st.plotly_chart(fig_m2, use_container_width=True)
                     st.caption("CONTEXT: FUEL FOR ASSET PRICES")
     
@@ -511,8 +507,8 @@ if fred_key:
         if macro_regime:
             st.markdown(f"""
             <div class='terminal-box'>
-                <div style='color:#aaa; font-size:0.8em;'>ECONOMIC REGIME (GMM)</div>
-                <div style='color:#00e6ff; font-size:1.1em; font-weight:bold;'>{macro_regime['regime']}</div>
+                <div style='color:#AAAAAA; font-size:0.8em;'>ECONOMIC REGIME (GMM)</div>
+                <div style='color:#00FFFF; font-size:1.1em; font-weight:bold;'>{macro_regime['regime']}</div>
                 <hr>
                 <div style='font-size:0.8em;'>CPI: {macro_regime['cpi']:.1f}%</div>
                 <div style='font-size:0.8em;'>RATES: {macro_regime['rate']:.1f}%</div>
@@ -524,10 +520,10 @@ if fred_key:
         st.markdown("#### 💵 DOLLAR (DXY) COMPARE")
         if not correlations.empty and 'Dollar' in correlations:
             dxy_corr = correlations['Dollar']
-            corr_color = "#00ff00" if dxy_corr > 0.5 else "#ff3333" if dxy_corr < -0.5 else "white"
+            corr_color = "#00FFFF" if dxy_corr > 0.5 else "#8080FF" if dxy_corr < -0.5 else "white"
             st.markdown(f"""
             <div class='terminal-box'>
-                <div style='color:#aaa; font-size:0.8em;'>CORRELATION TO DXY</div>
+                <div style='color:#AAAAAA; font-size:0.8em;'>CORRELATION TO DXY</div>
                 <div style='color:{corr_color}; font-size:1.5em;'>{dxy_corr:.2f}</div>
                 <div style='font-size:0.7em; color:gray;'>1.0 = Moves with DXY<br>-1.0 = Inverse to DXY</div>
             </div>
@@ -548,7 +544,7 @@ if not intraday_data.empty and strat_perf:
     q1, q2, q3 = st.columns([1, 2, 2])
     with q1:
         st.markdown("**STRATEGY SIGNAL**")
-        sig_color = "#00ff00" if "LONG" in strat_perf['signal'] else "#ffff00"
+        sig_color = "#00FFFF" if "LONG" in strat_perf['signal'] else "#8080FF"
         st.markdown(f"<span style='color:{sig_color}; font-size:1.8em; font-weight:bold;'>{strat_perf['signal']}</span>", unsafe_allow_html=True)
         st.markdown("---")
         st.metric("Total Return", f"{strat_perf['return']*100:.1f}%")
@@ -556,17 +552,18 @@ if not intraday_data.empty and strat_perf:
     with q2:
         ec_df = pd.DataFrame({"Strategy": strat_perf['equity_curve'], "Buy & Hold": strat_perf['df']['Cum_BnH']})
         fig_perf = go.Figure()
-        fig_perf.add_trace(go.Scatter(x=ec_df.index, y=ec_df['Buy & Hold'], name="Buy & Hold", line=dict(color='gray', dash='dot')))
-        fig_perf.add_trace(go.Scatter(x=ec_df.index, y=ec_df['Strategy'], name="Active Strat", line=dict(color='#00e6ff', width=2)))
-        terminal_chart_layout(fig_perf, title="STRATEGY EDGE VALIDATION", height=300)
+        fig_perf.add_trace(go.Scatter(x=ec_df.index, y=ec_df['Buy & Hold'], name="Buy & Hold", line=dict(color='#8080FF', dash='dot'))) # Benchmark = Mid Blue
+        fig_perf.add_trace(go.Scatter(x=ec_df.index, y=ec_df['Strategy'], name="Active Strat", line=dict(color='#00FFFF', width=2), fill='tozeroy', fillcolor='rgba(102, 204, 255, 0.1)')) # Strategy = Cyan
+        fig_perf = terminal_chart_layout(fig_perf, title="STRATEGY EDGE VALIDATION", height=300)
         st.plotly_chart(fig_perf, use_container_width=True)
     with q3:
         if vol_profile is not None:
             fig_vp = go.Figure()
-            colors = ['#00e6ff' if x == poc_price else '#333' for x in vol_profile['PriceLevel']]
-            fig_vp.add_trace(go.Bar(y=vol_profile['PriceLevel'], x=vol_profile['Volume'], orientation='h', marker_color='#ff9900', opacity=0.4))
-            fig_vp.add_hline(y=poc_price, line_dash="dash", line_color="yellow", annotation_text="POC")
-            terminal_chart_layout(fig_vp, title="INTRADAY VOLUME PROFILE", height=300)
+            # POC is Cyan, rest is dark gray
+            colors = ['#00FFFF' if x == poc_price else '#333' for x in vol_profile['PriceLevel']]
+            fig_vp.add_trace(go.Bar(y=vol_profile['PriceLevel'], x=vol_profile['Volume'], orientation='h', marker_color='#40E0FF', opacity=0.4))
+            fig_vp.add_hline(y=poc_price, line_dash="dash", line_color="#FFFFFF", annotation_text="POC")
+            fig_vp = terminal_chart_layout(fig_vp, title="INTRADAY VOLUME PROFILE", height=300)
             st.plotly_chart(fig_vp, use_container_width=True)
 
 # --- 5. VWAP EXECUTION ---
@@ -574,15 +571,18 @@ st.markdown("#### 🎯 SESSION VWAP + KEY LEVELS")
 vwap_df = qe.calculate_vwap_bands(intraday_data)
 if not vwap_df.empty:
     fig_vwap = go.Figure()
-    fig_vwap.add_trace(go.Candlestick(x=vwap_df.index, open=vwap_df['Open'], high=vwap_df['High'], low=vwap_df['Low'], close=vwap_df['Close'], name="Price"))
-    fig_vwap.add_trace(go.Scatter(x=vwap_df.index, y=vwap_df['VWAP'], name="Session VWAP", line=dict(color='#ff9900', width=2)))
+    fig_vwap.add_trace(go.Candlestick(
+        x=vwap_df.index, open=vwap_df['Open'], high=vwap_df['High'], low=vwap_df['Low'], close=vwap_df['Close'], name="Price",
+        increasing_line_color="#00FFFF", decreasing_line_color="#405060"
+    ))
+    fig_vwap.add_trace(go.Scatter(x=vwap_df.index, y=vwap_df['VWAP'], name="Session VWAP", line=dict(color='#FFFFFF', width=2)))
     fig_vwap.add_trace(go.Scatter(x=vwap_df.index, y=vwap_df['Upper_Band_1'], name="+1 STD", line=dict(color='gray', width=1), opacity=0.3))
     fig_vwap.add_trace(go.Scatter(x=vwap_df.index, y=vwap_df['Lower_Band_1'], name="-1 STD", line=dict(color='gray', width=1), opacity=0.3))
     if key_levels:
-        fig_vwap.add_hline(y=key_levels['PDH'], line_dash="dot", line_color="#ff3333", annotation_text="PDH")
-        fig_vwap.add_hline(y=key_levels['PDL'], line_dash="dot", line_color="#00ff00", annotation_text="PDL")
-        fig_vwap.add_hline(y=key_levels['Pivot'], line_width=1, line_color="#00e6ff", annotation_text="DAILY PIVOT")
-    terminal_chart_layout(fig_vwap, height=500)
+        fig_vwap.add_hline(y=key_levels['PDH'], line_dash="dot", line_color="#8080FF", annotation_text="PDH")
+        fig_vwap.add_hline(y=key_levels['PDL'], line_dash="dot", line_color="#00FFFF", annotation_text="PDL")
+        fig_vwap.add_hline(y=key_levels['Pivot'], line_width=1, line_color="#40E0FF", annotation_text="DAILY PIVOT")
+    fig_vwap = terminal_chart_layout(fig_vwap, height=500)
     st.plotly_chart(fig_vwap, use_container_width=True)
 
 # --- 6. GEX & VOLATILITY ---
@@ -595,10 +595,11 @@ if gex_df is not None and gex_spot is not None:
         center_strike = gex_spot 
         gex_zoom = gex_df[(gex_df['strike'] > center_strike * 0.9) & (gex_df['strike'] < center_strike * 1.1)]
         fig_gex = go.Figure()
-        colors = ['#00ff00' if x > 0 else '#ff3333' for x in gex_zoom['gex']]
+        # Cyan for Long GEX, Muted Blue/Red for Short
+        colors = ['#00FFFF' if x > 0 else '#8080FF' for x in gex_zoom['gex']]
         fig_gex.add_trace(go.Bar(x=gex_zoom['strike'], y=gex_zoom['gex'], marker_color=colors))
         fig_gex.add_vline(x=center_strike, line_dash="dot", line_color="white", annotation_text="ETF SPOT")
-        terminal_chart_layout(fig_gex, title=f"NET GAMMA PROFILE (EXP: {gex_date})")
+        fig_gex = terminal_chart_layout(fig_gex, title=f"NET GAMMA PROFILE (EXP: {gex_date})")
         st.plotly_chart(fig_gex, use_container_width=True)
         
     with g2:
@@ -607,7 +608,7 @@ if gex_df is not None and gex_spot is not None:
         sent_color = "bullish" if total_gex > 0 else "bearish"
         st.markdown(f"""
         <div class='terminal-box'>
-            <div style='color:#ff9900;'>NET GAMMA</div>
+            <div style='color:#00FFFF;'>NET GAMMA</div>
             <div style='font-size:1.5em; color:white;'>${total_gex:.1f}M</div>
             <div style='margin-top:10px;'><span class='{sent_color}'>{sentiment}</span></div>
         </div>
@@ -622,17 +623,17 @@ if gex_df is not None and gex_spot is not None:
             
         iv_display = current_iv if current_iv else 0
         vol_premium = iv_display - hv_current
-        prem_color = "#ff3333" if vol_premium > 5 else "#00ff00" if vol_premium < 0 else "white"
+        prem_color = "#8080FF" if vol_premium > 5 else "#00FFFF" if vol_premium < 0 else "white"
         
         st.markdown(f"""
         <div class='terminal-box'>
-            <div style='color:#aaa; font-size:0.8em;'>IMPLIED VOL (IV)</div>
-            <div style='font-size:1.2em; color:#00e6ff;'>{iv_display:.1f}%</div>
+            <div style='color:#AAAAAA; font-size:0.8em;'>IMPLIED VOL (IV)</div>
+            <div style='font-size:1.2em; color:#40E0FF;'>{iv_display:.1f}%</div>
             <hr style='margin:5px 0; border-color:#333;'>
-            <div style='color:#aaa; font-size:0.8em;'>HISTORICAL VOL (HV)</div>
-            <div style='font-size:1.2em; color:#e0e0e0;'>{hv_current:.1f}%</div>
+            <div style='color:#AAAAAA; font-size:0.8em;'>HISTORICAL VOL (HV)</div>
+            <div style='font-size:1.2em; color:#CCCCCC;'>{hv_current:.1f}%</div>
             <hr style='margin:5px 0; border-color:#333;'>
-            <div style='color:#aaa; font-size:0.8em;'>VOL PREMIUM (IV-HV)</div>
+            <div style='color:#AAAAAA; font-size:0.8em;'>VOL PREMIUM (IV-HV)</div>
             <div style='font-size:1.2em; color:{prem_color};'>{vol_premium:.1f}%</div>
         </div>
         """, unsafe_allow_html=True)
@@ -651,30 +652,30 @@ if stats:
         if 'hourly_perf' in stats and stats['hourly_perf'] is not None:
             hp = stats['hourly_perf']
             fig_h = go.Figure()
-            colors = ['#00ff00' if v > 0 else '#ff3333' for v in hp.values]
+            colors = ['#00FFFF' if v > 0 else '#8080FF' for v in hp.values]
             fig_h.add_trace(go.Bar(x=[f"{h:02d}:00" for h in hp.index], y=hp.values, marker_color=colors))
-            terminal_chart_layout(fig_h, title="AVG RETURN BY HOUR (NY TIME)", height=350)
+            fig_h = terminal_chart_layout(fig_h, title="AVG RETURN BY HOUR (NY TIME)", height=350)
             st.plotly_chart(fig_h, use_container_width=True)
     with tab_day:
         fig_d = go.Figure()
-        fig_d.add_trace(go.Bar(x=stats['day_high'].index, y=stats['day_high'].values, marker_color='#00ff00'))
-        terminal_chart_layout(fig_d, title="PROBABILITY OF WEEKLY HIGH", height=350)
+        fig_d.add_trace(go.Bar(x=stats['day_high'].index, y=stats['day_high'].values, marker_color='#00FFFF'))
+        fig_d = terminal_chart_layout(fig_d, title="PROBABILITY OF WEEKLY HIGH", height=350)
         st.plotly_chart(fig_d, use_container_width=True)
     with tab_week:
         if 'week_returns' in stats:
             wr = stats['week_returns']
             fig_w = go.Figure()
-            colors = ['#00ff00' if v > 0 else '#ff3333' for v in wr.values]
+            colors = ['#00FFFF' if v > 0 else '#8080FF' for v in wr.values]
             fig_w.add_trace(go.Bar(x=["Wk 1", "Wk 2", "Wk 3", "Wk 4", "Wk 5"], y=wr.values, marker_color=colors))
-            terminal_chart_layout(fig_w, title="AVG RETURN BY WEEK OF MONTH", height=350)
+            fig_w = terminal_chart_layout(fig_w, title="AVG RETURN BY WEEK OF MONTH", height=350)
             st.plotly_chart(fig_w, use_container_width=True)
 st.markdown("#### 🎲 MONTE CARLO PROJECTION")
 if pred_dates is not None and pred_paths is not None:
     fig_pred = go.Figure()
     hist_slice = daily_data['Close'].tail(90)
     fig_pred.add_trace(go.Scatter(x=hist_slice.index, y=hist_slice.values, name='History', line=dict(color='white')))
-    fig_pred.add_trace(go.Scatter(x=pred_dates, y=np.mean(pred_paths, axis=1), name='Avg Path', line=dict(color='#ff9900', dash='dash')))
-    terminal_chart_layout(fig_pred, title="MONTE CARLO PROJECTION (126 Days)", height=400)
+    fig_pred.add_trace(go.Scatter(x=pred_dates, y=np.mean(pred_paths, axis=1), name='Avg Path', line=dict(color='#00FFFF', dash='dash')))
+    fig_pred = terminal_chart_layout(fig_pred, title="MONTE CARLO PROJECTION (126 Days)", height=400)
     st.plotly_chart(fig_pred, use_container_width=True)
 
 # --- 8. COT QUANT TERMINAL ---
@@ -748,40 +749,42 @@ if cot_history is not None and not cot_history.empty:
         
         with tab_trend:
             fig_trend = go.Figure()
-            fig_trend.add_trace(go.Scatter(x=cot_history['date'], y=cot_history['Net Speculator'], name=spec_label, line=dict(color='#00FF00', width=2)))
-            fig_trend.add_trace(go.Scatter(x=cot_history['date'], y=cot_history['Net Hedger'], name=hedge_label, line=dict(color='#FF0000', width=2)))
+            # Spec = Cyan, Hedge = Mid Blue
+            fig_trend.add_trace(go.Scatter(x=cot_history['date'], y=cot_history['Net Speculator'], name=spec_label, line=dict(color='#00FFFF', width=2)))
+            fig_trend.add_trace(go.Scatter(x=cot_history['date'], y=cot_history['Net Hedger'], name=hedge_label, line=dict(color='#8080FF', width=2)))
             fig_trend.add_hline(y=0, line_dash="dash", line_color="gray")
-            terminal_chart_layout(fig_trend, title="NET POSITIONING HISTORY (Smart Money vs Specs)", height=400)
+            fig_trend = terminal_chart_layout(fig_trend, title="NET POSITIONING HISTORY (Smart Money vs Specs)", height=400)
             st.plotly_chart(fig_trend, use_container_width=True)
             
         with tab_struct:
             fig_struct = go.Figure()
-            # Speculator Longs (Green)
+            # Speculator Longs (Cyan)
             fig_struct.add_trace(go.Bar(
                 x=cot_history['date'], 
                 y=cot_history['spec_long'], 
                 name=f"{spec_label} Longs", 
-                marker_color='#00C805'
+                marker_color='#00FFFF'
             ))
-            # Speculator Shorts (Red) - Negative for Butterfly
+            # Speculator Shorts (Muted Blue/Red) - Negative for Butterfly
             fig_struct.add_trace(go.Bar(
                 x=cot_history['date'], 
                 y=-cot_history['spec_short'], 
                 name=f"{spec_label} Shorts", 
-                marker_color='#FF4B4B'
+                marker_color='#8080FF'
             ))
             fig_struct.update_layout(barmode='overlay')
-            terminal_chart_layout(fig_struct, title=f"{spec_label.upper()} STRUCTURE (Butterfly Chart)", height=400)
+            fig_struct = terminal_chart_layout(fig_struct, title=f"{spec_label.upper()} STRUCTURE (Butterfly Chart)", height=400)
             st.caption("Green Bars = Long Contracts. Red Bars = Short Contracts (Plotted Inversely).")
             st.plotly_chart(fig_struct, use_container_width=True)
             
         with tab_osc:
             fig_z = go.Figure()
-            colors = ['red' if val > 2 or val < -2 else 'gray' for val in cot_history['Spec Z-Score']]
+            # High Z-Score = Muted Red, Normal = Gray
+            colors = ['#8080FF' if val > 2 or val < -2 else '#333' for val in cot_history['Spec Z-Score']]
             fig_z.add_trace(go.Bar(x=cot_history['date'], y=cot_history['Spec Z-Score'], marker_color=colors, name="Z-Score"))
-            fig_z.add_hline(y=2, line_dash="dot", line_color="red", annotation_text="Overbought (+2σ)")
-            fig_z.add_hline(y=-2, line_dash="dot", line_color="red", annotation_text="Oversold (-2σ)")
-            terminal_chart_layout(fig_z, title="POSITIONING EXTREMES (Z-Score)", height=400)
+            fig_z.add_hline(y=2, line_dash="dot", line_color="#8080FF", annotation_text="Overbought (+2σ)")
+            fig_z.add_hline(y=-2, line_dash="dot", line_color="#8080FF", annotation_text="Oversold (-2σ)")
+            fig_z = terminal_chart_layout(fig_z, title="POSITIONING EXTREMES (Z-Score)", height=400)
             st.plotly_chart(fig_z, use_container_width=True)
             
     else:
@@ -814,7 +817,7 @@ if gemini_key:
         if "⚠️" in st.session_state['narrative_cache']: st.error(st.session_state['narrative_cache'])
         else:
             st.markdown(f"""
-            <div class='terminal-box' style='border-left: 4px solid #00e6ff;'>
+            <div class='terminal-box' style='border-left: 4px solid #00FFFF;'>
                 <div style='font-family: monospace; font-size: 0.95em; white-space: pre-wrap;'>{st.session_state['narrative_cache']}</div>
             </div>
             """, unsafe_allow_html=True)
