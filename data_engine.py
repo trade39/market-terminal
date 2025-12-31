@@ -32,7 +32,13 @@ def get_fred_series(series_id, api_key, observation_start=None):
             df = pd.DataFrame(data["observations"])
             df['date'] = pd.to_datetime(df['date'])
             df['value'] = pd.to_numeric(df['value'], errors='coerce')
-            return df[['date', 'value']].set_index('date').dropna()
+            
+            # CRITICAL FIX: Ensure Index is Timezone Naive for Merging
+            df = df.set_index('date')
+            if df.index.tz is not None:
+                df.index = df.index.tz_localize(None)
+                
+            return df[['value']].dropna()
     except: return pd.DataFrame()
     return pd.DataFrame()
 
