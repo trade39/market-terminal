@@ -177,7 +177,7 @@ def get_seasonality_stats(daily_data, ticker_name):
                 stats['hourly_perf'] = intra[intra['Hour'].isin(target_hours)].groupby('Hour')['Return'].mean() * 100
         except: stats['hourly_perf'] = None
         return stats
-    except: return None, None
+    except: return None
 
 @st.cache_data(ttl=3600)
 def generate_monte_carlo(stock_data, days=126, simulations=1000):
@@ -232,11 +232,14 @@ def calculate_technical_radar(df):
 @st.cache_data(ttl=3600)
 def get_correlations(base_ticker, api_key):
     try:
+        if not api_key: return pd.Series()
+        
         tickers = {"Base": base_ticker, "VIX": "^VIX", "10Y Yield": "^TNX", "Gold": "GC=F"}
         unique_tickers = list(set(tickers.values()))
         yf_data = safe_yf_download(unique_tickers, period="6mo", interval="1d")
         
-        # FIX: Fetch DXY from FRED using DTWEXAFEGS
+        # CRITICAL FIX: Fetch DXY from FRED using DTWEXAFEGS
+        # Trade Weighted U.S. Dollar Index: Advanced Foreign Economies, Goods and Services
         fred_data = get_fred_series("DTWEXAFEGS", api_key) 
         
         if yf_data.empty: return pd.Series()
@@ -261,10 +264,17 @@ def get_correlations(base_ticker, api_key):
         combined = yf_df
         if not fred_data.empty:
             fred_data = fred_data.rename(columns={'value': 'Dollar'})
+            
+            # CRITICAL FIX: Ensure BOTH indices are naive before merging
             if yf_df.index.tz is not None: yf_df.index = yf_df.index.tz_localize(None)
-            combined = pd.concat([yf_df, fred_data], axis=1).dropna()
+            if fred_data.index.tz is not None: fred_data.index = fred_data.index.tz_localize(None)
+            
+            # Join and forward fill FRED data to match YF frequency
+            combined = pd.concat([yf_df, fred_data], axis=1).ffill().dropna()
             
         if combined.empty or 'Base' not in combined.columns: return pd.Series()
+        
+        # Rolling correlation
         corrs = combined.pct_change().rolling(20).corr(combined['Base'].pct_change()).iloc[-1]
         return corrs.drop('Base', errors='ignore') 
     except Exception as e: 
