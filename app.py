@@ -71,7 +71,10 @@ st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <sp
 
 # Fetch Data
 daily_data = de.get_daily_data(asset_info['ticker'])
-dxy_data = de.get_dxy_data()
+
+# FIX: FETCH DXY FROM FRED (DTWEXAFEGS)
+dxy_data = de.get_dxy_data(fred_key) 
+
 intraday_data = de.get_intraday_data(asset_info['ticker'])
 eco_events = de.get_economic_calendar(rapid_key, use_demo=use_demo_data)
 
@@ -149,13 +152,13 @@ if not daily_data.empty:
     if poc_price:
         fig.add_hline(y=poc_price, line_dash="dash", line_color="yellow", annotation_text="POC", annotation_position="bottom right")
 
-    # Trace 3: DXY Overlay
+    # Trace 3: DXY Overlay (FRED)
     if not dxy_data.empty:
         dxy_aligned = dxy_data['Close'].reindex(daily_data.index, method='ffill')
         fig.add_trace(go.Scatter(
             x=dxy_aligned.index, 
             y=dxy_aligned.values, 
-            name="DXY (Dollar)", 
+            name="DXY (FRED)", 
             line=dict(color='orange', width=2),
             opacity=0.7,
             yaxis="y2"
@@ -171,7 +174,7 @@ if not daily_data.empty:
         xaxis=dict(showgrid=True, gridcolor="#222", zerolinecolor="#222"),
         yaxis=dict(showgrid=True, gridcolor="#222", zerolinecolor="#222", title="Asset Price"),
         yaxis2=dict(
-            title="DXY Index",
+            title="DXY Index (FRED)",
             overlaying="y",
             side="right",
             showgrid=False,
