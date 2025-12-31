@@ -14,7 +14,7 @@ import quant_engine as qe
 import ai_engine as ai
 
 # --- APP CONFIGURATION ---
-st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V6.0", page_icon="⚡")
+st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V6.1", page_icon="⚡")
 st.markdown(config.CSS_STYLE, unsafe_allow_html=True)
 
 # --- HELPER UI CLASS (MODULARIZATION) ---
@@ -39,11 +39,12 @@ class UI:
 for key in ['gemini_calls', 'news_calls', 'rapid_calls', 'coingecko_calls', 'fred_calls']:
     if key not in st.session_state: st.session_state[key] = 0
 if 'messages' not in st.session_state: st.session_state['messages'] = []
+if 'chat_history' not in st.session_state: st.session_state.chat_history = []
 
 # --- SIDEBAR ---
 with st.sidebar:
     st.markdown("<h3 style='color: #00FFFF;'>COMMAND LINE</h3>", unsafe_allow_html=True)
-    st.caption(f"Last Update: {datetime.now().strftime('%H:%M:%S')}") # Timestamp Feature
+    st.caption(f"Last Update: {datetime.now().strftime('%H:%M:%S')}") 
     
     selected_asset = st.selectbox("SEC / Ticker", list(config.ASSETS.keys()))
     asset_info = config.ASSETS[selected_asset]
@@ -56,7 +57,7 @@ with st.sidebar:
         if not ai.HAS_NLP: st.warning("NLP Disabled (textblob missing)")
         
     st.markdown("---")
-    # API Keys (Assumed loaded from config or environment, simplified here)
+    # API Keys
     rapid_key = get_api_key("rapidapi_key")
     news_key = get_api_key("news_api_key")
     gemini_key = get_api_key("gemini_api_key")
@@ -120,7 +121,6 @@ with st.spinner(f"⚡ Establishing secure link to {selected_asset} feed..."):
     db = fetch_dashboard_data(asset_info['ticker'], asset_info, fred_key, news_key, rapid_key, cg_key, use_demo_data)
     
     # 2. Process CPU Bound Analytics (Dependent on Raw Data)
-    # Note: These are fast enough to run linear, or could be parallelized if heavy
     daily_data = db['daily']
     intraday_data = db['intraday']
     
@@ -150,7 +150,7 @@ with st.spinner(f"⚡ Establishing secure link to {selected_asset} feed..."):
 # ==============================================================================
 # 2. HEAD-UP DISPLAY (HUD)
 # ==============================================================================
-st.markdown(f"<h1 style='border-bottom: 2px solid #00FFFF;'>{selected_asset} <span style='font-size:0.5em; color:#AAAAAA;'>TERMINAL PRO V6.0</span></h1>", unsafe_allow_html=True)
+st.markdown(f"<h1 style='border-bottom: 2px solid #00FFFF;'>{selected_asset} <span style='font-size:0.5em; color:#AAAAAA;'>TERMINAL PRO V6.1</span></h1>", unsafe_allow_html=True)
 
 close, high, low = daily_data['Close'], daily_data['High'], daily_data['Low']
 curr, pct = close.iloc[-1], ((close.iloc[-1] - close.iloc[-2]) / close.iloc[-2]) * 100
@@ -257,20 +257,45 @@ with sc2:
         with t_s2:
              st.bar_chart(seasonality_stats.get('hourly_perf', pd.Series()), color="#8080FF")
 
-# COT Section
+# COT Section (Safe)
 if db['cot'] is not None and not db['cot'].empty:
     with st.expander("🏛️ INSTITUTIONAL POSITIONING (COT)", expanded=False):
         cot = db['cot']
-        net_spec = cot.iloc[-1]['spec_long'] - cot.iloc[-1]['spec_short']
-        z_score = qe.calculate_z_score(cot['spec_long'] - cot['spec_short'])
-        
-        c_cot1, c_cot2 = st.columns([1, 2])
-        with c_cot1:
-            UI.card("NET SPECULATOR", f"{int(net_spec):,}", f"Z-Score: {z_score:.2f}σ", "bullish" if net_spec > 0 else "bearish")
-        with c_cot2:
-            fig_cot = go.Figure()
-            fig_cot.add_trace(go.Scatter(x=cot['date'], y=cot['spec_long'] - cot['spec_short'], fill='tozeroy', line=dict(color='#00FFFF'), name="Net Spec"))
-            st.plotly_chart(terminal_chart_layout(fig_cot, title="COT NET POS", height=150), use_container_width=True)
+        try:
+            # Safe extraction of latest row
+            latest = cot.iloc[-1]
+            
+            # Safe conversion to numeric, coercing bad data to NaN, then 0
+            s_long = pd.to_numeric(latest.get('spec_long', 0), errors='coerce')
+            s_short = pd.to_numeric(latest.get('spec_short', 0), errors='coerce')
+            
+            # Handle potential NaNs
+            s_long = 0 if pd.isna(s_long) else s_long
+            s_short = 0 if pd.isna(s_short) else s_short
+            
+            net_spec = s_long - s_short
+            
+            # Series for Z-Score
+            series_diff = cot['spec_long'] - cot['spec_short']
+            z_score = qe.calculate_z_score(series_diff)
+            if pd.isna(z_score): z_score = 0.0
+            
+            c_cot1, c_cot2 = st.columns([1, 2])
+            with c_cot1:
+                UI.card(
+                    "NET SPECULATOR", 
+                    f"{int(net_spec):,}", 
+                    f"Z-Score: {z_score:.2f}σ", 
+                    "bullish" if net_spec > 0 else "bearish"
+                )
+            with c_cot2:
+                fig_cot = go.Figure()
+                fig_cot.add_trace(go.Scatter(x=cot['date'], y=series_diff, fill='tozeroy', line=dict(color='#00FFFF'), name="Net Spec"))
+                st.plotly_chart(terminal_chart_layout(fig_cot, title="COT NET POS", height=150), use_container_width=True)
+
+        except Exception as e:
+            st.error(f"⚠️ COT Data Error: {str(e)}")
+
 
 # ==============================================================================
 # 5. DYNAMICS & EXECUTION
@@ -313,9 +338,6 @@ for i, (label, val) in enumerate(levels_map):
 # ==============================================================================
 st.markdown("---")
 UI.header("🧠 PHASE 4: AI COMMAND CENTER")
-
-# Chat Interface
-if "chat_history" not in st.session_state: st.session_state.chat_history = []
 
 ai_col1, ai_col2 = st.columns([2, 1])
 
