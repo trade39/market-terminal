@@ -16,21 +16,6 @@ except ImportError:
     HAS_COT_LIB = False
 
 # --- FETCHERS ---
-@st.cache_data(ttl=300)
-def get_daily_data(ticker):
-    try: return safe_yf_download(ticker, period="10y", interval="1d")
-    except: return pd.DataFrame()
-
-@st.cache_data(ttl=300)
-def get_dxy_data():
-    try: return safe_yf_download("DX-Y.NYB", period="10y", interval="1d")
-    except: return pd.DataFrame()
-
-@st.cache_data(ttl=300)
-def get_intraday_data(ticker):
-    try: return safe_yf_download(ticker, period="5d", interval="15m")
-    except: return pd.DataFrame()
-
 @st.cache_data(ttl=86400)
 def get_fred_series(series_id, api_key, observation_start=None):
     if not api_key: return pd.DataFrame()
@@ -50,6 +35,26 @@ def get_fred_series(series_id, api_key, observation_start=None):
             return df[['date', 'value']].set_index('date').dropna()
     except: return pd.DataFrame()
     return pd.DataFrame()
+
+@st.cache_data(ttl=300)
+def get_daily_data(ticker):
+    try: return safe_yf_download(ticker, period="10y", interval="1d")
+    except: return pd.DataFrame()
+
+@st.cache_data(ttl=3600)
+def get_dxy_data(api_key):
+    """Fetches DXY Proxy (DTWEXAFEGS) from FRED instead of yfinance."""
+    if not api_key: return pd.DataFrame()
+    # DTWEXAFEGS: Trade Weighted U.S. Dollar Index: Advanced Foreign Economies
+    df = get_fred_series("DTWEXAFEGS", api_key)
+    if not df.empty:
+        df = df.rename(columns={"value": "Close"})
+    return df
+
+@st.cache_data(ttl=300)
+def get_intraday_data(ticker):
+    try: return safe_yf_download(ticker, period="5d", interval="15m")
+    except: return pd.DataFrame()
 
 @st.cache_data(ttl=300) 
 def get_coingecko_stats(cg_id, api_key):
