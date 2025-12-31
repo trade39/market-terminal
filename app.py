@@ -498,7 +498,11 @@ if fred_key:
             </div>
             """, unsafe_allow_html=True)
         else:
-            st.info("DXY Correlation Unavailable")
+            # IMPROVED ERROR MESSAGING
+            if not fred_key:
+                st.warning("MISSING API KEY: Add 'fred_api_key' to secrets.")
+            else:
+                st.warning("Data Unavailable: DXY (FRED) merge failed.")
 else:
     st.info("FRED API Key not found. Add `fred_api_key` to secrets to view Fed Macro Data.")
 
