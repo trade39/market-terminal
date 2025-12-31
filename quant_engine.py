@@ -177,7 +177,7 @@ def get_seasonality_stats(daily_data, ticker_name):
                 stats['hourly_perf'] = intra[intra['Hour'].isin(target_hours)].groupby('Hour')['Return'].mean() * 100
         except: stats['hourly_perf'] = None
         return stats
-    except: return None
+    except: return None, None
 
 @st.cache_data(ttl=3600)
 def generate_monte_carlo(stock_data, days=126, simulations=1000):
@@ -235,7 +235,10 @@ def get_correlations(base_ticker, api_key):
         tickers = {"Base": base_ticker, "VIX": "^VIX", "10Y Yield": "^TNX", "Gold": "GC=F"}
         unique_tickers = list(set(tickers.values()))
         yf_data = safe_yf_download(unique_tickers, period="6mo", interval="1d")
+        
+        # FIX: Fetch DXY from FRED using DTWEXAFEGS
         fred_data = get_fred_series("DTWEXAFEGS", api_key) 
+        
         if yf_data.empty: return pd.Series()
         
         # Handle Close column extraction safely
