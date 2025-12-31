@@ -29,55 +29,63 @@ COT_MAPPING = {
     "Ethereum": {"keywords": ["ETHER", "CHICAGO MERCANTILE EXCHANGE"], "report_type": "traders_in_financial_futures_fut", "labels": ("Leveraged Funds", "Asset Managers")}
 }
 
-# --- CSS STYLES ---
+# --- CSS STYLES (MONOCHROMATIC NAVY/CYAN) ---
 CSS_STYLE = """
 <style>
-    /* Main Background - True Black */
-    .stApp { background-color: #000000; font-family: 'Courier New', Courier, monospace; }
+    /* 1. Main Background - Deep Navy/Near Black */
+    .stApp { background-color: #0A0F1E; font-family: 'Courier New', Courier, monospace; }
     
-    /* Sidebar Background */
-    section[data-testid="stSidebar"] { background-color: #111111; border-right: 1px solid #333; }
+    /* 2. Sidebar - Slightly Lighter Navy */
+    section[data-testid="stSidebar"] { background-color: #12161F; border-right: 1px solid #1E252F; }
     
-    /* Text Colors */
-    h1, h2, h3, h4 { color: #ff9900 !important; font-family: 'Arial', sans-serif; text-transform: uppercase; letter-spacing: 1px; }
-    p, div, span { color: #e0e0e0; }
+    /* 3. Text Colors - White Primary, Light Gray Secondary */
+    h1, h2, h3, h4 { color: #FFFFFF !important; font-family: 'Arial', sans-serif; text-transform: uppercase; letter-spacing: 1px; }
+    p, div, span, label { color: #CCCCCC; }
     
-    /* Metric Styling */
+    /* 4. Metric Styling - Cyan Values */
     div[data-testid="stMetricValue"] { 
-        color: #00e6ff !important; font-family: 'Courier New', monospace;
+        color: #00FFFF !important; font-family: 'Courier New', monospace;
         font-weight: bold;
     }
-    div[data-testid="stMetricLabel"] { color: #ff9900 !important; font-size: 0.8rem; }
+    div[data-testid="stMetricLabel"] { color: #AAAAAA !important; font-size: 0.8rem; }
     
-    /* Tables/Dataframes */
-    .stDataFrame { border: 1px solid #333; }
-    
-    /* Custom Boxes */
+    /* 5. Custom Boxes (Chart/Table Backgrounds) */
     .terminal-box { 
-        border: 1px solid #333; background-color: #0a0a0a; 
+        border: 1px solid #1E252F; background-color: #12161F; 
         padding: 15px; 
         margin-bottom: 10px;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.3);
     }
     
-    /* Signal badges */
-    .bullish { color: #000000; background-color: #00ff00; padding: 2px 6px; font-weight: bold; border-radius: 4px; }
-    .bearish { color: #000000; background-color: #ff3333; padding: 2px 6px; font-weight: bold; border-radius: 4px; }
-    .neutral { color: #000000; background-color: #cccccc; padding: 2px 6px; font-weight: bold; border-radius: 4px; }
+    /* 6. Signal Badges - Monochromatic Blue/Cyan Theme */
+    /* Bullish = Cyan (Active), Bearish = Muted Blue/Gray (Passive) */
+    .bullish { color: #0A0F1E; background-color: #00FFFF; padding: 2px 6px; font-weight: bold; border-radius: 4px; }
+    .bearish { color: #FFFFFF; background-color: #405060; padding: 2px 6px; font-weight: bold; border-radius: 4px; border: 1px solid #8080FF; }
+    .neutral { color: #CCCCCC; background-color: #1E252F; padding: 2px 6px; font-weight: bold; border-radius: 4px; border: 1px solid #333; }
     
-    /* News Link */
-    .news-link { color: #00e6ff; text-decoration: none; font-size: 0.9em; }
-    .news-link:hover { text-decoration: underline; color: #ff9900; }
+    /* 7. News Link */
+    .news-link { color: #40E0FF; text-decoration: none; font-size: 0.9em; }
+    .news-link:hover { text-decoration: underline; color: #FFFFFF; }
     
-    /* UI Elements */
-    .stSelectbox > div > div { border-radius: 0px; background-color: #111; color: white; border: 1px solid #444; }
-    .stTextInput > div > div > input { color: white; background-color: #111; border: 1px solid #444; }
+    /* 8. UI Elements */
+    .stSelectbox > div > div { border-radius: 0px; background-color: #12161F; color: white; border: 1px solid #333; }
+    .stTextInput > div > div > input { color: white; background-color: #12161F; border: 1px solid #333; }
+    
+    /* Tabs */
     .stTabs [data-baseweb="tab-list"] { gap: 2px; }
-    .stTabs [data-baseweb="tab"] { height: 30px; white-space: pre-wrap; background-color: #111; color: white; border-radius: 0px; border: 1px solid #333;}
-    .stTabs [aria-selected="true"] { background-color: #ff9900; color: black !important; font-weight: bold;}
-    button { border-radius: 0px !important; border: 1px solid #ff9900 !important; color: #ff9900 !important; background: black !important; }
-    hr { margin: 1em 0; border: 0; border-top: 1px solid #333; }
+    .stTabs [data-baseweb="tab"] { height: 30px; white-space: pre-wrap; background-color: #12161F; color: #AAAAAA; border-radius: 0px; border: 1px solid #1E252F;}
+    .stTabs [aria-selected="true"] { background-color: #1E252F; color: #00FFFF !important; font-weight: bold; border-bottom: 2px solid #00FFFF;}
     
-    /* API Limit Progress Bars */
-    .stProgress > div > div > div > div { background-color: #ff9900; }
+    /* Buttons */
+    button { border-radius: 0px !important; border: 1px solid #00FFFF !important; color: #00FFFF !important; background: #0A0F1E !important; }
+    button:hover { background-color: #00FFFF !important; color: #0A0F1E !important; }
+    
+    hr { margin: 1em 0; border: 0; border-top: 1px solid #333333; }
+    
+    /* Progress Bars - Cyan */
+    .stProgress > div > div > div > div { background-color: #00FFFF; }
+    
+    /* Dataframes */
+    .stDataFrame { border: 1px solid #1E252F; }
 </style>
 """
