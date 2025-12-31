@@ -1,90 +1,18 @@
 import streamlit as st
-import yfinance as yf
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-import requests
-import google.generativeai as genai
-from newsapi import NewsApiClient
-from datetime import datetime, timedelta
-from scipy.stats import norm
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.mixture import GaussianMixture
-import os
-import time
-import io
-import zipfile
 
-# --- SAFE IMPORT SYSTEM (Prevents Crashes) ---
-# 1. TextBlob (Sentiment)
-try:
-    from textblob import TextBlob
-    HAS_NLP = True
-except ImportError:
-    HAS_NLP = False
-
-# 2. COT Reports (Institutional Data)
-try:
-    import cot_reports as cot
-    HAS_COT_LIB = True
-except ImportError:
-    HAS_COT_LIB = False
+# --- MODULES ---
+import config
+from utils import get_api_key, terminal_chart_layout
+import data_engine as de
+import quant_engine as qe
+import ai_engine as ai
 
 # --- APP CONFIGURATION ---
 st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V5.18", page_icon="⚡")
-
-# --- BLOOMBERG TERMINAL STYLING (CSS) ---
-st.markdown("""
-<style>
-    /* Main Background - True Black */
-    .stApp { background-color: #000000; font-family: 'Courier New', Courier, monospace; }
-    
-    /* Sidebar Background */
-    section[data-testid="stSidebar"] { background-color: #111111; border-right: 1px solid #333; }
-    
-    /* Text Colors */
-    h1, h2, h3, h4 { color: #ff9900 !important; font-family: 'Arial', sans-serif; text-transform: uppercase; letter-spacing: 1px; }
-    p, div, span { color: #e0e0e0; }
-    
-    /* Metric Styling */
-    div[data-testid="stMetricValue"] { 
-        color: #00e6ff !important; font-family: 'Courier New', monospace;
-        font-weight: bold;
-    }
-    div[data-testid="stMetricLabel"] { color: #ff9900 !important; font-size: 0.8rem; }
-    
-    /* Tables/Dataframes */
-    .stDataFrame { border: 1px solid #333; }
-    
-    /* Custom Boxes */
-    .terminal-box { 
-        border: 1px solid #333; background-color: #0a0a0a; 
-        padding: 15px; 
-        margin-bottom: 10px;
-    }
-    
-    /* Signal badges */
-    .bullish { color: #000000; background-color: #00ff00; padding: 2px 6px; font-weight: bold; border-radius: 4px; }
-    .bearish { color: #000000; background-color: #ff3333; padding: 2px 6px; font-weight: bold; border-radius: 4px; }
-    .neutral { color: #000000; background-color: #cccccc; padding: 2px 6px; font-weight: bold; border-radius: 4px; }
-    
-    /* News Link */
-    .news-link { color: #00e6ff; text-decoration: none; font-size: 0.9em; }
-    .news-link:hover { text-decoration: underline; color: #ff9900; }
-    
-    /* UI Elements */
-    .stSelectbox > div > div { border-radius: 0px; background-color: #111; color: white; border: 1px solid #444; }
-    .stTextInput > div > div > input { color: white; background-color: #111; border: 1px solid #444; }
-    .stTabs [data-baseweb="tab-list"] { gap: 2px; }
-    .stTabs [data-baseweb="tab"] { height: 30px; white-space: pre-wrap; background-color: #111; color: white; border-radius: 0px; border: 1px solid #333;}
-    .stTabs [aria-selected="true"] { background-color: #ff9900; color: black !important; font-weight: bold;}
-    button { border-radius: 0px !important; border: 1px solid #ff9900 !important; color: #ff9900 !important; background: black !important; }
-    hr { margin: 1em 0; border: 0; border-top: 1px solid #333; }
-    
-    /* API Limit Progress Bars */
-    .stProgress > div > div > div > div { background-color: #ff9900; }
-</style>
-""", unsafe_allow_html=True)
+st.markdown(config.CSS_STYLE, unsafe_allow_html=True)
 
 # --- SESSION STATE INITIALIZATION ---
 if 'gemini_calls' not in st.session_state: st.session_state['gemini_calls'] = 0
@@ -95,847 +23,11 @@ if 'fred_calls' not in st.session_state: st.session_state['fred_calls'] = 0
 if 'narrative_cache' not in st.session_state: st.session_state['narrative_cache'] = None
 if 'thesis_cache' not in st.session_state: st.session_state['thesis_cache'] = None
 
-# --- CONSTANTS & MAPPINGS ---
-ASSETS = {
-    "Gold (Comex)": {"ticker": "GC=F", "opt_ticker": "GLD", "news_query": "Gold Price", "cg_id": None},
-    "S&P 500": {"ticker": "^GSPC", "opt_ticker": "SPY", "news_query": "S&P 500", "cg_id": None},
-    "NASDAQ": {"ticker": "^IXIC", "opt_ticker": "QQQ", "news_query": "Nasdaq", "cg_id": None},
-    "EUR/USD": {"ticker": "EURUSD=X", "opt_ticker": None, "news_query": "EURUSD", "cg_id": None},
-    "Bitcoin": {"ticker": "BTC-USD", "opt_ticker": "BITO", "news_query": "Bitcoin", "cg_id": "bitcoin"},
-    "Ethereum": {"ticker": "ETH-USD", "opt_ticker": "ETHE", "news_query": "Ethereum", "cg_id": "ethereum"},
-    "Solana": {"ticker": "SOL-USD", "opt_ticker": None, "news_query": "Solana Crypto", "cg_id": "solana"},
-    "XRP": {"ticker": "XRP-USD", "opt_ticker": None, "news_query": "Ripple XRP", "cg_id": "ripple"},
-    "BNB": {"ticker": "BNB-USD", "opt_ticker": None, "news_query": "Binance Coin", "cg_id": "binancecoin"},
-    "Cardano": {"ticker": "ADA-USD", "opt_ticker": None, "news_query": "Cardano ADA", "cg_id": "cardano"},
-    "Dogecoin": {"ticker": "DOGE-USD", "opt_ticker": None, "news_query": "Dogecoin", "cg_id": "dogecoin"},
-    "Shiba Inu": {"ticker": "SHIB-USD", "opt_ticker": None, "news_query": "Shiba Inu Coin", "cg_id": "shiba-inu"},
-    "Pepe": {"ticker": "PEPE-USD", "opt_ticker": None, "news_query": "Pepe Coin", "cg_id": "pepe"},
-    "Chainlink": {"ticker": "LINK-USD", "opt_ticker": None, "news_query": "Chainlink", "cg_id": "chainlink"},
-    "Polygon": {"ticker": "MATIC-USD", "opt_ticker": None, "news_query": "Polygon MATIC", "cg_id": "matic-network"},
-}
-
-# COT MAPPING
-COT_MAPPING = {
-    "Gold (Comex)": {
-        "keywords": ["GOLD", "COMMODITY EXCHANGE"], 
-        "report_type": "disaggregated_fut", 
-        "labels": ("Managed Money", "Producers/Merchants")
-    },
-    "S&P 500": {
-        "keywords": ["E-MINI S&P 500", "CHICAGO MERCANTILE EXCHANGE"], 
-        "report_type": "traders_in_financial_futures_fut", 
-        "labels": ("Leveraged Funds", "Asset Managers")
-    },
-    "NASDAQ": {
-        "keywords": ["E-MINI NASDAQ-100", "CHICAGO MERCANTILE EXCHANGE"], 
-        "report_type": "traders_in_financial_futures_fut", 
-        "labels": ("Leveraged Funds", "Asset Managers")
-    },
-    "EUR/USD": {
-        "keywords": ["EURO FX", "CHICAGO MERCANTILE EXCHANGE"], 
-        "report_type": "traders_in_financial_futures_fut", 
-        "labels": ("Leveraged Funds", "Asset Managers")
-    },
-    "Bitcoin": {
-        "keywords": ["BITCOIN", "CHICAGO MERCANTILE EXCHANGE"], 
-        "report_type": "traders_in_financial_futures_fut", 
-        "labels": ("Leveraged Funds", "Asset Managers")
-    },
-    "Ethereum": {
-        "keywords": ["ETHER", "CHICAGO MERCANTILE EXCHANGE"], 
-        "report_type": "traders_in_financial_futures_fut", 
-        "labels": ("Leveraged Funds", "Asset Managers")
-    }
-}
-
-# --- HELPER FUNCTIONS ---
-def get_api_key(key_name):
-    if "api_keys" in st.secrets and key_name in st.secrets["api_keys"]:
-        return st.secrets["api_keys"][key_name]
-    if key_name in st.secrets:
-        return st.secrets[key_name]
-    if key_name == "gemini_api_key":
-        if "GOOGLE_API_KEY" in st.secrets: return st.secrets["GOOGLE_API_KEY"]
-    if key_name in os.environ:
-        return os.environ[key_name]
-    return None
-
-# --- FIX 1: ROBUST DATAFRAME FLATTENER (Prevents yfinance MultiIndex crashes) ---
-def flatten_dataframe(df):
-    if df.empty: return df
-    df = df.copy()
-    if isinstance(df.columns, pd.MultiIndex):
-        # Check if level 0 contains standard price columns (Open, Close, etc)
-        if 'Close' in df.columns.get_level_values(0):
-            df.columns = df.columns.get_level_values(0)
-        # Sometimes yf puts Ticker in Level 0 and Price in Level 1
-        elif df.columns.nlevels > 1 and 'Close' in df.columns.get_level_values(1):
-            df.columns = df.columns.get_level_values(1)
-            
-    df = df.loc[:, ~df.columns.duplicated()]
-    return df
-
-def safe_yf_download(tickers, period, interval, retries=3):
-    for i in range(retries):
-        try:
-            time.sleep(0.1) 
-            df = yf.download(tickers, period=period, interval=interval, progress=False)
-            if not df.empty:
-                return flatten_dataframe(df)
-        except Exception as e:
-            if i == retries - 1: return pd.DataFrame()
-            time.sleep(2 ** i)
-    return pd.DataFrame()
-
-# --- FRED API ENGINE ---
-@st.cache_data(ttl=86400)
-def get_fred_series(series_id, api_key, observation_start=None):
-    if not api_key: return pd.DataFrame()
-    st.session_state['fred_calls'] += 1
-    base_url = "https://api.stlouisfed.org/fred/series/observations"
-    if not observation_start:
-        observation_start = (datetime.now() - timedelta(days=365*10)).strftime('%Y-%m-%d')
-    params = {"series_id": series_id, "api_key": api_key, "file_type": "json", "observation_start": observation_start}
-    try:
-        response = requests.get(base_url, params=params)
-        data = response.json()
-        if "observations" in data:
-            df = pd.DataFrame(data["observations"])
-            df['date'] = pd.to_datetime(df['date'])
-            df['value'] = pd.to_numeric(df['value'], errors='coerce')
-            return df[['date', 'value']].set_index('date').dropna()
-    except: return pd.DataFrame()
-    return pd.DataFrame()
-
-# --- COINGECKO API ENGINE ---
-@st.cache_data(ttl=300) 
-def get_coingecko_stats(cg_id, api_key):
-    if not cg_id or not api_key: return None
-    st.session_state['coingecko_calls'] += 1
-    url = f"https://api.coingecko.com/api/v3/coins/{cg_id}"
-    params = {
-        "localization": "false", "tickers": "false", "market_data": "true",
-        "community_data": "true", "developer_data": "true", "sparkline": "false"
-    }
-    headers = {"x-cg-demo-api-key": api_key}
-    try:
-        response = requests.get(url, params=params, headers=headers)
-        if response.status_code == 200:
-            data = response.json()
-            return {
-                "rank": data.get('market_cap_rank', 'N/A'),
-                "sentiment": data.get('sentiment_votes_up_percentage', 50),
-                "hashing": data.get('hashing_algorithm', 'N/A'),
-                "ath": data['market_data']['ath']['usd'],
-                "ath_change": data['market_data']['ath_change_percentage']['usd'],
-                "desc": data.get('description', {}).get('en', '').split('.')[0] + "." 
-            }
-        return None
-    except Exception: return None
-
-# --- LLM ENGINE ---
-def get_technical_narrative(ticker, price, daily_pct, regime, ml_signal, gex_data, cot_data, levels, macro_data, api_key):
-    if not api_key: return "AI Analyst unavailable (No Key)."
-    st.session_state['gemini_calls'] += 1
-    
-    gex_text = "N/A"
-    if gex_data is not None:
-        total_gex = gex_data['gex'].sum()
-        gex_text = f"Net Gamma: ${total_gex/1_000_000:.1f}M ({'Long/Sticky' if total_gex>0 else 'Short/Volatile'})"
-    lvl_text = "N/A"
-    if levels:
-        lvl_text = f"Pivot: {levels['Pivot']:.2f}, R1: {levels['R1']:.2f}, S1: {levels['S1']:.2f}"
-    
-    macro_str = "N/A"
-    if macro_data:
-        macro_str = f"YieldCurve: {macro_data.get('yield_curve', 'N/A')}, Inflation(CPI): {macro_data.get('cpi', 'N/A')}%, Rates: {macro_data.get('rates', 'N/A')}%, MacroRegime: {macro_data.get('regime', 'N/A')}"
-    
-    cot_str = "N/A"
-    if cot_data and 'sentiment' in cot_data:
-        cot_str = cot_data['sentiment']
-
-    prompt = f"""
-    You are a Senior Portfolio Manager. Analyze data for {ticker} and write a 3-bullet executive summary.
-    DATA: Price: {price:,.2f} ({daily_pct:.2f}%), Regime: {regime['regime'] if regime else 'Unknown'}, 
-    ML: {ml_signal}, GEX: {gex_text}, COT: {cot_str}, Levels: {lvl_text}
-    MACRO CONTEXT: {macro_str}
-    TASK:
-    1. Synthesize Technicals + Macro.
-    2. Identify key trigger level.
-    3. Final Execution bias ("Buy Dips", "Fade", etc).
-    Keep it concise. Bloomberg Terminal style.
-    """
-    try:
-        genai.configure(api_key=api_key)
-        
-        # Auto-discover models
-        available_models = []
-        for m in genai.list_models():
-            if 'generateContent' in m.supported_generation_methods:
-                available_models.append(m)
-        
-        if not available_models: return "Error: No valid models found. Check API Key permissions."
-            
-        available_models.sort(key=lambda x: 'flash' not in x.name)
-        chosen_model_name = available_models[0].name
-        
-        model = genai.GenerativeModel(chosen_model_name)
-        response = model.generate_content(prompt)
-        return response.text
-    except Exception as e:
-        if "429" in str(e): return "⚠️ API LIMIT REACHED."
-        return f"AI Analyst unavailable: {str(e)}"
-
-def generate_deep_dive_thesis(ticker, price, change, regime, ml_signal, gex_data, cot_data, levels, news_summary, macro_data, api_key):
-    if not api_key: return "API Key Missing."
-    st.session_state['gemini_calls'] += 1
-    
-    gex_text = "N/A"
-    if gex_data is not None:
-        total_gex = gex_data['gex'].sum()
-        gex_text = f"Net Gamma: ${total_gex/1_000_000:.1f}M"
-    macro_str = "N/A"
-    if macro_data:
-        macro_str = f"YieldCurve: {macro_data.get('yield_curve', 'N/A')}, CPI: {macro_data.get('cpi', 'N/A')}%, Rates: {macro_data.get('rates', 'N/A')}%, Regime: {macro_data.get('regime', 'N/A')}"
-    
-    cot_str = "N/A"
-    if cot_data and 'sentiment' in cot_data:
-        cot_str = cot_data['sentiment']
-
-    prompt = f"""
-    Write a detailed Investment Thesis for {ticker}.
-    DATA: Price: {price:,.2f} ({change:.2f}%), Regime: {regime['regime'] if regime else 'Unknown'}, 
-    ML: {ml_signal}, GEX: {gex_text}, COT: {cot_str}
-    MACRO: {macro_str}
-    NEWS: {news_summary}
-    OUTPUT FORMAT (Markdown):
-    ### 1. THE MACRO & TECHNICAL CROSSROADS
-    ### 2. CORE ARGUMENT (Long/Short/Neutral)
-    ### 3. THE BEAR/BULL CASE (Risks)
-    ### 4. KEY LEVELS (Invalidation)
-    """
-    try:
-        genai.configure(api_key=api_key)
-        available_models = []
-        for m in genai.list_models():
-            if 'generateContent' in m.supported_generation_methods:
-                available_models.append(m)
-        if not available_models: return "Error: No valid models found."
-        available_models.sort(key=lambda x: 'flash' not in x.name)
-        chosen_model_name = available_models[0].name
-        
-        model = genai.GenerativeModel(chosen_model_name)
-        response = model.generate_content(prompt)
-        return response.text
-    except Exception as e:
-        return f"Thesis Generation Failed: {str(e)}"
-
-# --- NLP SENTIMENT ENGINE ---
-def calculate_news_sentiment(news_items):
-    if not HAS_NLP or not news_items: return pd.DataFrame()
-    
-    scores = []
-    for news in news_items:
-        try:
-            blob = TextBlob(f"{news['title']} {news['title']}") 
-            score = blob.sentiment.polarity
-            scores.append({
-                "title": news['title'],
-                "score": score,
-                "time": news['time']
-            })
-        except: continue
-        
-    df = pd.DataFrame(scores)
-    if df.empty: return pd.DataFrame()
-    
-    df = df.iloc[::-1].reset_index(drop=True) 
-    df['cumulative'] = df['score'].cumsum()
-    return df
-
-# --- QUANT ENGINES ---
-def calculate_hurst(series, lags=range(2, 20)):
-    try:
-        tau = [np.sqrt(np.std(np.subtract(series[lag:], series[:-lag]))) for lag in lags]
-        poly = np.polyfit(np.log(lags), np.log(tau), 1)
-        return poly[0] * 2.0
-    except: return 0.5
-
-@st.cache_data(ttl=3600)
-def get_market_regime(ticker):
-    try:
-        df = safe_yf_download(ticker, period="5y", interval="1d")
-        if df.empty: return None
-        data = df.copy()
-        data['Returns'] = data['Close'].pct_change()
-        data['Volatility'] = data['Returns'].rolling(20).std()
-        data = data.dropna()
-        X = data[['Returns', 'Volatility']].values
-        gmm = GaussianMixture(n_components=3, covariance_type="full", random_state=42)
-        gmm.fit(X)
-        current_state = gmm.predict(X[[-1]])[0]
-        probs = gmm.predict_proba(X[[-1]])[0]
-        means = gmm.means_
-        state_order = np.argsort(means[:, 1]) 
-        regime_map = {state_order[0]: "LOW VOL (Trend)", state_order[1]: "NEUTRAL (Chop)", state_order[2]: "HIGH VOL (Crisis)"}
-        regime_desc = regime_map.get(current_state, "Unknown")
-        color = "bullish" if "LOW VOL" in regime_desc else "bearish" if "HIGH VOL" in regime_desc else "neutral"
-        return {"regime": regime_desc, "color": color, "confidence": max(probs)}
-    except: return None
-
-@st.cache_data(ttl=86400)
-def get_macro_ml_regime(cpi_df, rate_df):
-    if cpi_df.empty or rate_df.empty: return None
-    try:
-        df = pd.merge(cpi_df, rate_df, left_index=True, right_index=True, how='inner')
-        df.columns = ['CPI', 'Rates']
-        df['CPI_YoY'] = df['CPI'].pct_change(12) * 100
-        df = df.dropna()
-        X = df[['CPI_YoY', 'Rates']].values
-        if len(X) < 12: return None
-        gmm = GaussianMixture(n_components=4, random_state=42)
-        gmm.fit(X)
-        curr_cpi = df['CPI_YoY'].iloc[-1]
-        curr_rate = df['Rates'].iloc[-1]
-        regime_name = "Neutral"
-        if curr_cpi > 4 and curr_rate < curr_cpi: regime_name = "INFLATIONARY (Neg Real Rates)"
-        elif curr_cpi > 4 and curr_rate > curr_cpi: regime_name = "TIGHTENING (Pos Real Rates)"
-        elif curr_cpi < 2: regime_name = "DEFLATIONARY / RISK OFF"
-        else: regime_name = "GOLDILOCKS / STABLE"
-        return {"regime": regime_name, "cpi": curr_cpi, "rate": curr_rate}
-    except: return None
-
-@st.cache_data(ttl=3600)
-def get_ml_prediction(ticker):
-    try:
-        df = safe_yf_download(ticker, period="2y", interval="1d") 
-        if df.empty: return None, 0.5
-        data = df.copy()
-        data['Returns'] = data['Close'].pct_change()
-        data['Target'] = (data['Close'].shift(-1) > data['Close']).astype(int)
-        data['Vol_5d'] = data['Returns'].rolling(5).std()
-        data['Mom_5d'] = data['Close'].pct_change(5)
-        data = data.dropna()
-        if len(data) < 50: return None, 0.5
-        X = data[['Vol_5d', 'Mom_5d']]
-        y = data['Target']
-        model = RandomForestClassifier(n_estimators=100, max_depth=3, random_state=42)
-        model.fit(X, y)
-        prob_up = model.predict_proba(X.iloc[[-1]])[0][1]
-        return model, prob_up
-    except: return None, 0.5
-
-# --- GAMMA EXPOSURE (IV UPDATE) ---
-def calculate_black_scholes_gamma(S, K, T, r, sigma):
-    if T <= 0 or sigma <= 0: return 0
-    d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
-    gamma = norm.pdf(d1) / (S * sigma * np.sqrt(T))
-    return gamma
-
-@st.cache_data(ttl=3600)
-def get_gex_profile(opt_ticker):
-    if opt_ticker is None: return None, None, None, None
-    try:
-        tk = yf.Ticker(opt_ticker)
-        try:
-            hist = tk.history(period="1d")
-            spot_price = hist['Close'].iloc[-1] if not hist.empty else tk.fast_info.last_price
-        except: return None, None, None, None
-        
-        if spot_price is None: return None, None, None, None
-        exps = tk.options
-        if not exps: return None, None, None, None
-        
-        target_exp = exps[1] if len(exps) > 1 else exps[0]
-        chain = tk.option_chain(target_exp)
-        calls, puts = chain.calls, chain.puts
-        
-        if calls.empty or puts.empty: return None, None, None, None
-        
-        # Calculate ATM IV
-        atm_mask = (calls['strike'] > spot_price * 0.95) & (calls['strike'] < spot_price * 1.05)
-        atm_calls = calls[atm_mask]
-        avg_iv = atm_calls['impliedVolatility'].mean() * 100 if not atm_calls.empty else 0
-        
-        exp_date = datetime.strptime(target_exp, "%Y-%m-%d")
-        days_to_exp = (exp_date - datetime.now()).days
-        T = 0.001 if days_to_exp <= 0 else days_to_exp / 365.0
-        gex_data = []
-        strikes = sorted(list(set(calls['strike'].tolist() + puts['strike'].tolist())))
-        for K in strikes:
-            if K < spot_price * 0.75 or K > spot_price * 1.25: continue
-            c_row = calls[calls['strike'] == K]
-            p_row = puts[puts['strike'] == K]
-            c_oi = c_row['openInterest'].iloc[0] if not c_row.empty else 0
-            p_oi = p_row['openInterest'].iloc[0] if not p_row.empty else 0
-            c_iv = c_row['impliedVolatility'].iloc[0] if not c_row.empty and 'impliedVolatility' in c_row.columns else 0.2
-            p_iv = p_row['impliedVolatility'].iloc[0] if not p_row.empty and 'impliedVolatility' in p_row.columns else 0.2
-            c_gamma = calculate_black_scholes_gamma(spot_price, K, T, 0.045, c_iv)
-            p_gamma = calculate_black_scholes_gamma(spot_price, K, T, 0.045, p_iv)
-            net_gex = (c_gamma * c_oi - p_gamma * p_oi) * spot_price * 100
-            gex_data.append({"strike": K, "gex": net_gex})
-            
-        df = pd.DataFrame(gex_data, columns=['strike', 'gex'])
-        return df, target_exp, spot_price, avg_iv
-    except: return None, None, None, None
-
-def calculate_volume_profile(df, bins=50):
-    if df.empty: return None, None
-    price_range = df['High'].max() - df['Low'].min()
-    if price_range == 0: return None, None
-    bin_size = price_range / bins
-    df['PriceBin'] = ((df['Close'] - df['Low'].min()) // bin_size).astype(int)
-    vol_profile = df.groupby('PriceBin')['Volume'].sum().reset_index()
-    vol_profile['PriceLevel'] = df['Low'].min() + (vol_profile['PriceBin'] * bin_size)
-    poc_idx = vol_profile['Volume'].idxmax()
-    return vol_profile, vol_profile.loc[poc_idx, 'PriceLevel']
-
-@st.cache_data(ttl=3600)
-def get_seasonality_stats(daily_data, ticker_name):
-    stats = {}
-    try:
-        df = daily_data.copy()
-        df['Week_Num'] = df.index.to_period('W')
-        high_days = df.groupby('Week_Num')['High'].idxmax().apply(lambda x: df.loc[x].name.day_name())
-        days_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']
-        stats['day_high'] = high_days.value_counts().reindex(days_order, fill_value=0) / len(high_days) * 100
-        df['Day'] = df.index.day
-        df['Month_Week'] = np.ceil(df['Day'] / 7).astype(int)
-        df['Returns'] = df['Close'].pct_change()
-        stats['week_returns'] = df.groupby('Month_Week')['Returns'].mean() * 100
-        try:
-            intra = safe_yf_download(ticker_name, period="60d", interval="1h")
-            if not intra.empty:
-                if intra.index.tz is None: intra.index = intra.index.tz_localize('UTC')
-                intra.index = intra.index.tz_convert('America/New_York')
-                intra['Hour'] = intra.index.hour
-                intra['Return'] = intra['Close'].pct_change()
-                target_hours = [2,3,4,5,6, 8,9,10,11, 14,15,16,17,18, 20,21,22,23]
-                stats['hourly_perf'] = intra[intra['Hour'].isin(target_hours)].groupby('Hour')['Return'].mean() * 100
-        except: stats['hourly_perf'] = None
-        return stats
-    except: return None
-
-@st.cache_data(ttl=3600)
-def generate_monte_carlo(stock_data, days=126, simulations=1000):
-    if stock_data is None or stock_data.empty or len(stock_data) < 2: return None, None
-    try:
-        close = stock_data['Close']
-        log_returns = np.log(1 + close.pct_change())
-        u, var = log_returns.mean(), log_returns.var()
-        drift = u - (0.5 * var)
-        stdev = log_returns.std()
-        price_paths = np.zeros((days + 1, simulations))
-        price_paths[0] = close.iloc[-1]
-        daily_returns = np.exp(drift + stdev * np.random.normal(0, 1, (days, simulations)))
-        for t in range(1, days + 1): price_paths[t] = price_paths[t - 1] * daily_returns[t - 1]
-        return pd.date_range(start=close.index[-1], periods=days + 1, freq='B'), price_paths
-    except: return None, None
-
-def calculate_technical_radar(df):
-    if df.empty or len(df) < 30: return None
-    data = df.copy()
-    close = data['Close']
-    delta = close.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-    rs = gain / loss
-    data['RSI'] = 100 - (100 / (1 + rs))
-    k = close.ewm(span=12, adjust=False, min_periods=12).mean()
-    d = close.ewm(span=26, adjust=False, min_periods=26).mean()
-    data['MACD'] = k - d
-    data['MACD_Signal'] = data['MACD'].ewm(span=9, adjust=False, min_periods=9).mean()
-    data['EMA_20'] = close.ewm(span=20, adjust=False).mean()
-    data['EMA_50'] = close.ewm(span=50, adjust=False).mean()
-    last = data.iloc[-1]
-    signals = {}
-    
-    if last['RSI'] < 30: signals['RSI'] = {"val": f"{last['RSI']:.0f}", "bias": "OVERSOLD (Bull)", "col": "bullish"}
-    elif last['RSI'] > 70: signals['RSI'] = {"val": f"{last['RSI']:.0f}", "bias": "OVERBOUGHT (Bear)", "col": "bearish"}
-    else: signals['RSI'] = {"val": f"{last['RSI']:.0f}", "bias": "NEUTRAL", "col": "neutral"}
-    
-    macd_hist = last['MACD'] - last['MACD_Signal']
-    if macd_hist > 0 and last['MACD'] > 0: signals['MACD'] = {"val": f"{macd_hist:.2f}", "bias": "BULLISH", "col": "bullish"}
-    elif macd_hist < 0 and last['MACD'] < 0: signals['MACD'] = {"val": f"{macd_hist:.2f}", "bias": "BEARISH", "col": "bearish"}
-    else: signals['MACD'] = {"val": f"{macd_hist:.2f}", "bias": "NEUTRAL", "col": "neutral"}
-    
-    if last['Close'] > last['EMA_20'] and last['EMA_20'] > last['EMA_50']:
-        signals['Trend'] = {"val": "Uptrend", "bias": "STRONG BULL", "col": "bullish"}
-    elif last['Close'] < last['EMA_20'] and last['EMA_20'] < last['EMA_50']:
-        signals['Trend'] = {"val": "Downtrend", "bias": "STRONG BEAR", "col": "bearish"}
-    else: signals['Trend'] = {"val": "Chop", "bias": "WEAK/MIXED", "col": "neutral"}
-    return signals
-
-# --- NEWS & ECO ---
-def parse_eco_value(val_str):
-    if not isinstance(val_str, str) or val_str == '': return None
-    clean = val_str.replace('%', '').replace(',', '')
-    multiplier = 1.0
-    if 'K' in clean.upper(): multiplier = 1000.0; clean = clean.upper().replace('K', '')
-    elif 'M' in clean.upper(): multiplier = 1000000.0; clean = clean.upper().replace('M', '')
-    elif 'B' in clean.upper(): multiplier = 1000000000.0; clean = clean.upper().replace('B', '')
-    try: return float(clean) * multiplier
-    except: return None
-
-def analyze_eco_context(actual_str, forecast_str, previous_str):
-    is_happened = actual_str is not None and actual_str != ""
-    val_actual = parse_eco_value(actual_str)
-    val_forecast = parse_eco_value(forecast_str)
-    val_prev = parse_eco_value(previous_str)
-    context_str = ""
-    bias = "Neutral"
-    if is_happened:
-        if val_actual is not None and val_forecast is not None:
-            context_str = f"Actual ({actual_str}) vs Forecast ({forecast_str})"
-            delta = val_actual - val_forecast
-            pct_dev = abs(delta / val_forecast) if val_forecast != 0 else 1.0
-            if pct_dev < 0.02: bias = "Mean Reverting"
-            elif delta > 0: bias = "Bullish"
-            else: bias = "Bearish"
-        else: context_str = f"Actual: {actual_str}"
-    else:
-        if val_forecast is not None and val_prev is not None:
-            context_str = f"Forecast ({forecast_str}) vs Prev ({previous_str})"
-            delta = val_forecast - val_prev
-            pct_dev = abs(delta / val_prev) if val_prev != 0 else 1.0
-            if pct_dev < 0.02: bias = "Mean Reverting"
-            elif delta > 0: bias = "Bullish Exp."
-            else: bias = "Bearish Exp."
-        else: context_str = "Waiting for Data..."
-    return context_str, bias
-
-@st.cache_data(ttl=14400) 
-def get_financial_news_general(api_key, query="Finance"):
-    if not api_key: return []
-    st.session_state['news_calls'] += 1
-    try:
-        newsapi = NewsApiClient(api_key=api_key)
-        all_articles = newsapi.get_everything(q=query, language='en', sort_by='publishedAt')
-        articles = []
-        if all_articles['status'] == 'ok':
-            for art in all_articles['articles'][:6]:
-                articles.append({"title": art['title'], "source": art['source']['name'], "url": art['url'], "time": art['publishedAt']})
-        return articles
-    except: return []
-
-@st.cache_data(ttl=14400)
-def get_forex_factory_news(api_key, news_type='breaking'):
-    if not api_key: return []
-    st.session_state['rapid_calls'] += 1
-    base_url = "https://forex-factory-scraper1.p.rapidapi.com/"
-    endpoints = {'breaking': "latest_breaking_news", 'fundamental': "latest_fundamental_analysis_news"}
-    url = base_url + endpoints.get(news_type, "latest_breaking_news")
-    headers = {"x-rapidapi-key": api_key, "x-rapidapi-host": "forex-factory-scraper1.p.rapidapi.com"}
-    try:
-        response = requests.get(url, headers=headers)
-        data = response.json()
-        normalized_news = []
-        if isinstance(data, list):
-            for item in data[:6]:
-                normalized_news.append({
-                    "title": item.get('title', 'No Title'),
-                    "url": item.get('link', item.get('url', '#')),
-                    "source": "ForexFactory",
-                    "time": item.get('date', item.get('time', 'Recent'))
-                })
-        return normalized_news
-    except: return []
-
-# --- MOCK/DEMO SUPPORT ---
-def get_mock_calendar_data():
-    return [
-        {"currency": "USD", "impact": "High", "event_name": "[DEMO] Unemployment Claims", "actual": "210K", "forecast": "215K", "previous": "208K", "time": "8:30am"},
-        {"currency": "USD", "impact": "High", "event_name": "[DEMO] Philly Fed Mfg Index", "actual": "15.5", "forecast": "8.0", "previous": "12.2", "time": "8:30am"},
-        {"currency": "USD", "impact": "Medium", "event_name": "[DEMO] Natural Gas Storage", "actual": "85B", "forecast": "82B", "previous": "79B", "time": "10:30am"},
-        {"currency": "USD", "impact": "High", "event_name": "[DEMO] Powell Speaks", "actual": "", "forecast": "", "previous": "", "time": "2:00pm"},
-    ]
-
-@st.cache_data(ttl=21600)
-def get_economic_calendar(api_key, use_demo=False):
-    if use_demo: return get_mock_calendar_data()
-    if not api_key: return get_mock_calendar_data() 
-
-    st.session_state['rapid_calls'] += 1
-    try:
-        url = "https://forex-factory-scraper1.p.rapidapi.com/get_real_time_calendar_details"
-        now = datetime.now()
-        querystring = {"calendar": "Forex", "year": str(now.year), "month": str(now.month), "day": str(now.day), "currency": "ALL", "event_name": "ALL", "timezone": "GMT-04:00 Eastern Time (US & Canada)", "time_format": "12h"}
-        headers = {"x-rapidapi-host": "forex-factory-scraper1.p.rapidapi.com", "x-rapidapi-key": api_key}
-        
-        response = requests.get(url, headers=headers, params=querystring)
-        if response.status_code == 429: return get_mock_calendar_data() 
-            
-        data = response.json()
-        raw_events = data if isinstance(data, list) else data.get('data', [])
-        
-        filtered_events = []
-        for e in raw_events:
-            if e.get('currency') == 'USD' and (e.get('impact') == 'High' or e.get('impact') == 'Medium'):
-                filtered_events.append(e)
-                
-        if filtered_events: return filtered_events
-    except: pass 
-    return []
-
-# --- TRADING LOGIC ---
-@st.cache_data(ttl=300)
-def run_strategy_backtest(ticker):
-    try:
-        df = safe_yf_download(ticker, period="2y", interval="1d")
-        if df.empty: return None
-        df['Returns'] = df['Close'].pct_change()
-        df['Range'] = df['High'] - df['Low']
-        df['TR'] = pd.concat([df['Range'], (df['High'] - df['Close'].shift(1)).abs(), (df['Low'] - df['Close'].shift(1)).abs()], axis=1).max(axis=1)
-        df['Log_TR'] = np.log(df['TR'] / df['Close'])
-        df['Vol_Forecast'] = df['Log_TR'].ewm(span=10).mean()
-        df['Vol_Baseline'] = df['Log_TR'].rolling(20).mean()
-        df['SMA_50'] = df['Close'].rolling(50).mean()
-        df['Signal'] = np.where((df['Vol_Forecast'] > df['Vol_Baseline']) & (df['Close'] > df['SMA_50']), 1, 0)
-        df['Strategy_Returns'] = df['Signal'].shift(1) * df['Returns']
-        df['Cum_BnH'] = (1 + df['Returns']).cumprod()
-        df['Cum_Strat'] = (1 + df['Strategy_Returns']).cumprod()
-        total_return = df['Cum_Strat'].iloc[-1] - 1
-        sharpe = (df['Strategy_Returns'].mean() / df['Strategy_Returns'].std()) * np.sqrt(252) if df['Strategy_Returns'].std() != 0 else 0
-        current_signal = "LONG" if df['Signal'].iloc[-1] == 1 else "CASH/NEUTRAL"
-        return {"df": df, "signal": current_signal, "return": total_return, "sharpe": sharpe, "equity_curve": df['Cum_Strat']}
-    except: return None
-
-def calculate_vwap_bands(df):
-    if df.empty: return df
-    df = df.copy()
-    df['TP'] = (df['High'] + df['Low'] + df['Close']) / 3
-    df['VP'] = df['TP'] * df['Volume']
-    df['Date'] = df.index.date
-    df['Cum_VP'] = df.groupby('Date')['VP'].cumsum()
-    df['Cum_Vol'] = df.groupby('Date')['Volume'].cumsum()
-    df['VWAP'] = df['Cum_VP'] / df['Cum_Vol']
-    df['Sq_Dist'] = df['Volume'] * (df['TP'] - df['VWAP'])**2
-    df['Cum_Sq_Dist'] = df.groupby('Date')['Sq_Dist'].cumsum()
-    df['Std_Dev'] = np.sqrt(df['Cum_Sq_Dist'] / df['Cum_Vol'])
-    df['Upper_Band_1'] = df['VWAP'] + df['Std_Dev']
-    df['Lower_Band_1'] = df['VWAP'] - df['Std_Dev']
-    return df
-
-@st.cache_data(ttl=300) 
-def get_relative_strength(asset_ticker, benchmark_ticker="SPY"):
-    try:
-        asset = safe_yf_download(asset_ticker, period="5d", interval="15m")
-        bench = safe_yf_download(benchmark_ticker, period="5d", interval="15m")
-        if asset.empty or bench.empty: return pd.DataFrame()
-        df = pd.DataFrame(index=asset.index)
-        df['Asset_Close'] = asset['Close']
-        df['Bench_Close'] = bench['Close']
-        df = df.dropna()
-        current_date = df.index[-1].date()
-        session_data = df[df.index.date == current_date].copy()
-        if session_data.empty: return pd.DataFrame()
-        session_data['Asset_Pct'] = (session_data['Asset_Close'] / session_data['Asset_Close'].iloc[0]) - 1
-        session_data['Bench_Pct'] = (session_data['Bench_Close'] / session_data['Bench_Close'].iloc[0]) - 1
-        session_data['RS_Score'] = session_data['Asset_Pct'] - session_data['Bench_Pct']
-        return session_data
-    except: return pd.DataFrame()
-
-def get_key_levels(daily_df):
-    if daily_df.empty: return {}
-    try: last_complete_day = daily_df.iloc[-2]
-    except: return {}
-    high, low, close = last_complete_day['High'], last_complete_day['Low'], last_complete_day['Close']
-    pivot = (high + low + close) / 3
-    return {
-        "PDH": high, "PDL": low, "PDC": close, "Pivot": pivot, 
-        "R1": (2 * pivot) - low, "S1": (2 * pivot) - high
-    }
-
-# --- FIX 2: SAFE CORRELATION ENGINE (Handles duplicates) ---
-@st.cache_data(ttl=3600)
-def get_correlations(base_ticker, api_key):
-    try:
-        tickers = {"Base": base_ticker, "VIX": "^VIX", "10Y Yield": "^TNX", "Gold": "GC=F"}
-        # Download unique tickers only
-        unique_tickers = list(set(tickers.values()))
-        yf_data = safe_yf_download(unique_tickers, period="6mo", interval="1d")
-        fred_data = get_fred_series("DTWEXAFEGS", api_key) 
-        if yf_data.empty: return pd.Series()
-        
-        # Handle Close column extraction safely
-        if isinstance(yf_data.columns, pd.MultiIndex): 
-            # If MultiIndex, Close is likely a level
-            if 'Close' in yf_data.columns.get_level_values(0):
-                 yf_df = yf_data.xs('Close', axis=1, level=0)
-            else:
-                 yf_df = yf_data['Close'].copy()
-        elif 'Close' in yf_data.columns: 
-            yf_df = yf_data['Close'].copy()
-        else: 
-            yf_df = yf_data.copy()
-
-        if isinstance(yf_df, pd.Series): yf_df = yf_df.to_frame(name=unique_tickers[0])
-
-        # Rename Logic
-        for label, ticker in tickers.items():
-            if ticker in yf_df.columns:
-                yf_df.rename(columns={ticker: label}, inplace=True)
-        
-        # Ensure Base exists (if it was overwritten by another key, we map it back)
-        combined = yf_df
-        if not fred_data.empty:
-            fred_data = fred_data.rename(columns={'value': 'Dollar'})
-            if yf_df.index.tz is not None: yf_df.index = yf_df.index.tz_localize(None)
-            combined = pd.concat([yf_df, fred_data], axis=1).dropna()
-            
-        if combined.empty or 'Base' not in combined.columns: return pd.Series()
-        corrs = combined.pct_change().rolling(20).corr(combined['Base'].pct_change()).iloc[-1]
-        return corrs.drop('Base', errors='ignore') 
-    except Exception as e: 
-        return pd.Series()
-
-# --- COT QUANT ENGINE ---
-def clean_headers(df):
-    if isinstance(df.columns[0], int):
-        for i in range(20):
-            row_str = " ".join(df.iloc[i].astype(str).tolist()).lower()
-            if "market" in row_str and ("long" in row_str or "positions" in row_str):
-                df.columns = df.iloc[i]
-                return df.iloc[i+1:].reset_index(drop=True)
-    return df
-
-def map_columns(df, report_type):
-    col_map = {}
-    def get_col(keywords, exclude=None):
-        for col in df.columns:
-            c_str = str(col).lower()
-            if all(k in c_str for k in keywords):
-                if exclude and any(x in c_str for x in exclude): continue
-                return col
-        return None
-
-    col_map['date'] = get_col(['report', 'date']) or get_col(['as', 'of', 'date']) or get_col(['date'])
-    col_map['market'] = get_col(['market'])
-
-    if "disaggregated" in report_type:
-        col_map['spec_long'] = get_col(['money', 'long'], exclude=['lev'])
-        col_map['spec_short'] = get_col(['money', 'short'], exclude=['lev'])
-        col_map['hedge_long'] = get_col(['prod', 'merc', 'long'])
-        col_map['hedge_short'] = get_col(['prod', 'merc', 'short'])
-        
-    elif "financial" in report_type:
-        col_map['spec_long'] = get_col(['lev', 'money', 'long'])
-        col_map['spec_short'] = get_col(['lev', 'money', 'short'])
-        col_map['hedge_long'] = get_col(['asset', 'mgr', 'long'])
-        col_map['hedge_short'] = get_col(['asset', 'mgr', 'short'])
-
-    final_map = {v: k for k, v in col_map.items() if v}
-    df = df.rename(columns=final_map)
-    
-    for c in ['spec_long', 'spec_short', 'hedge_long', 'hedge_short']:
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
-            
-    return df
-
-@st.cache_data(ttl=86400)
-def fetch_cot_history(asset_name, start_year=2024):
-    if asset_name not in COT_MAPPING: return None
-    config = COT_MAPPING[asset_name]
-    keywords = config['keywords']
-    report_type = config['report_type']
-    
-    master_df = pd.DataFrame()
-    current_year = datetime.now().year
-    
-    for y in range(start_year, current_year + 1):
-        df_year = None
-        if HAS_COT_LIB:
-            try: df_year = cot.cot_year(year=y, cot_report_type=report_type)
-            except: pass
-        
-        # Fallback Direct
-        if df_year is None or df_year.empty:
-            try:
-                url = f"https://www.cftc.gov/files/dea/history/deahistfo{y}.zip" 
-                r = requests.get(url)
-                if r.status_code == 200:
-                    with zipfile.ZipFile(io.BytesIO(r.content)) as z:
-                        filename = z.namelist()[0]
-                        with z.open(filename) as f:
-                            df_year = pd.read_csv(f, low_memory=False)
-            except: pass
-            
-        if df_year is not None and not df_year.empty:
-            df_year = clean_headers(df_year)
-            df_year = map_columns(df_year, report_type)
-            master_df = pd.concat([master_df, df_year])
-            
-    if master_df.empty: return None
-    
-    # Filter
-    if 'market' not in master_df.columns: return None
-    mask = master_df['market'].astype(str).apply(lambda x: all(k.lower() in x.lower() for k in keywords))
-    df_asset = master_df[mask].copy()
-    
-    if 'date' in df_asset.columns:
-        df_asset['date'] = pd.to_datetime(df_asset['date'], errors='coerce')
-        df_asset = df_asset.sort_values('date')
-        
-    return df_asset
-
-# --- QUANT HELPERS ---
-def calculate_z_score(series, window=52):
-    roll_mean = series.rolling(window=window).mean()
-    roll_std = series.rolling(window=window).std()
-    return (series - roll_mean) / roll_std
-
-def get_percentile(series, current_value):
-    return (series < current_value).mean() * 100
-
-def generate_cot_analysis(spec_net, hedge_net, spec_label, hedge_label):
-    spec_sent = "🟢 BULLISH" if spec_net > 0 else "🔴 BEARISH"
-    hedge_sent = "🟢 BULLISH" if hedge_net > 0 else "🔴 BEARISH"
-    if (spec_net > 0 and hedge_net < 0) or (spec_net < 0 and hedge_net > 0):
-        structure = "✅ **Healthy Structure:** Speculators and Hedgers are on opposite sides (Risk Transfer active)."
-    else:
-        structure = "⚠️ **Anomaly:** Both groups are positioned in the same direction. Watch for liquidity gaps."
-    return f"""
-    * **{spec_label}:** {spec_sent} (Net: {int(spec_net):,})
-    * **{hedge_label}:** {hedge_sent} (Net: {int(hedge_net):,})
-    {structure}
-    """
-
-# --- DATA FETCHERS ---
-@st.cache_data(ttl=300)
-def get_daily_data(ticker):
-    try: return safe_yf_download(ticker, period="10y", interval="1d")
-    except: return pd.DataFrame()
-
-@st.cache_data(ttl=300)
-def get_dxy_data():
-    try: return safe_yf_download("DX-Y.NYB", period="10y", interval="1d")
-    except: return pd.DataFrame()
-
-@st.cache_data(ttl=300)
-def get_intraday_data(ticker):
-    try: return safe_yf_download(ticker, period="5d", interval="15m")
-    except: return pd.DataFrame()
-
-def terminal_chart_layout(fig, title="", height=350):
-    fig.update_layout(
-        title=dict(text=title, font=dict(color="#ff9900", family="Arial")),
-        template="plotly_dark",
-        paper_bgcolor="#000000",
-        plot_bgcolor="#000000",
-        height=height,
-        margin=dict(l=40, r=40, t=40, b=40),
-        xaxis=dict(showgrid=True, gridcolor="#222", zerolinecolor="#222"),
-        yaxis=dict(showgrid=True, gridcolor="#222", zerolinecolor="#222"),
-        font=dict(family="Courier New", color="#e0e0e0")
-    )
-    return fig
-
 # --- SIDEBAR ---
 with st.sidebar:
     st.markdown("<h3 style='color: #ff9900;'>COMMAND LINE</h3>", unsafe_allow_html=True)
-    selected_asset = st.selectbox("SEC / Ticker", list(ASSETS.keys()))
-    asset_info = ASSETS[selected_asset]
+    selected_asset = st.selectbox("SEC / Ticker", list(config.ASSETS.keys()))
+    asset_info = config.ASSETS[selected_asset]
     
     use_demo_data = st.checkbox("🛠️ USE DEMO DATA (Save Quota)", value=True, help="Use mock data for Calendar to save RapidAPI credits.")
     
@@ -958,9 +50,9 @@ with st.sidebar:
             st.warning("🔴 LIVE API MODE")
         
         # Dependency Status
-        if not HAS_NLP:
+        if not ai.HAS_NLP:
             st.warning("NLP Disabled: `textblob` missing")
-        if not HAS_COT_LIB:
+        if not de.HAS_COT_LIB:
             st.info("Using Direct COT Fetch (No Lib)")
             
     st.markdown("---")
@@ -978,25 +70,25 @@ with st.sidebar:
 st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V5.18</span></h1>", unsafe_allow_html=True)
 
 # Fetch Data
-daily_data = get_daily_data(asset_info['ticker'])
-dxy_data = get_dxy_data()
-intraday_data = get_intraday_data(asset_info['ticker'])
-eco_events = get_economic_calendar(rapid_key, use_demo=use_demo_data)
+daily_data = de.get_daily_data(asset_info['ticker'])
+dxy_data = de.get_dxy_data()
+intraday_data = de.get_intraday_data(asset_info['ticker'])
+eco_events = de.get_economic_calendar(rapid_key, use_demo=use_demo_data)
 
 # Fetch News
-news_general = get_financial_news_general(news_key, query=asset_info.get('news_query', 'Finance'))
-news_ff = get_forex_factory_news(rapid_key, 'breaking')
+news_general = de.get_financial_news_general(news_key, query=asset_info.get('news_query', 'Finance'))
+news_ff = de.get_forex_factory_news(rapid_key, 'breaking')
 combined_news_for_llm = news_general[:5] + news_ff[:5]
 
 # Engines
-_, ml_prob = get_ml_prediction(asset_info['ticker'])
-gex_df, gex_date, gex_spot, current_iv = get_gex_profile(asset_info['opt_ticker'])
-vol_profile, poc_price = calculate_volume_profile(intraday_data)
-hurst = calculate_hurst(daily_data['Close'].values) if not daily_data.empty else 0.5
-regime_data = get_market_regime(asset_info['ticker'])
-tech_radar = calculate_technical_radar(daily_data)
-correlations = get_correlations(asset_info['ticker'], fred_key)
-news_sentiment_df = calculate_news_sentiment(combined_news_for_llm)
+_, ml_prob = qe.get_ml_prediction(asset_info['ticker'])
+gex_df, gex_date, gex_spot, current_iv = qe.get_gex_profile(asset_info['opt_ticker'])
+vol_profile, poc_price = qe.calculate_volume_profile(intraday_data)
+hurst = qe.calculate_hurst(daily_data['Close'].values) if not daily_data.empty else 0.5
+regime_data = qe.get_market_regime(asset_info['ticker'])
+tech_radar = qe.calculate_technical_radar(daily_data)
+correlations = qe.get_correlations(asset_info['ticker'], fred_key)
+news_sentiment_df = ai.calculate_news_sentiment(combined_news_for_llm)
 
 # Initialize COT Data for AI (prevents scope crash)
 cot_data = None 
@@ -1132,7 +224,7 @@ if cg_id and cg_key:
     st.markdown("### 🦎 COINGECKO FUNDAMENTALS")
     
     with st.spinner("Fetching CoinGecko Data..."):
-        cg_data = get_coingecko_stats(cg_id, cg_key)
+        cg_data = de.get_coingecko_stats(cg_id, cg_key)
     
     if cg_data:
         c_cg1, c_cg2, c_cg3, c_cg4 = st.columns(4)
@@ -1171,8 +263,8 @@ if cg_id and cg_key:
 # --- 2. INTRADAY TACTICAL FEED ---
 st.markdown("---")
 st.markdown("### 🔭 INTRADAY TACTICAL FEED")
-rs_data = get_relative_strength(asset_info['ticker'])
-key_levels = get_key_levels(daily_data)
+rs_data = qe.get_relative_strength(asset_info['ticker'])
+key_levels = qe.get_key_levels(daily_data)
 col_intra_1, col_intra_2 = st.columns([2, 1])
 with col_intra_1:
     if not rs_data.empty:
@@ -1208,6 +300,44 @@ with col_intra_2:
 # --- 3. EVENTS & NEWS & MACRO ---
 st.markdown("---")
 col_eco, col_news = st.columns([2, 1])
+
+def parse_eco_value(val_str):
+    if not isinstance(val_str, str) or val_str == '': return None
+    clean = val_str.replace('%', '').replace(',', '')
+    multiplier = 1.0
+    if 'K' in clean.upper(): multiplier = 1000.0; clean = clean.upper().replace('K', '')
+    elif 'M' in clean.upper(): multiplier = 1000000.0; clean = clean.upper().replace('M', '')
+    elif 'B' in clean.upper(): multiplier = 1000000000.0; clean = clean.upper().replace('B', '')
+    try: return float(clean) * multiplier
+    except: return None
+
+def analyze_eco_context(actual_str, forecast_str, previous_str):
+    is_happened = actual_str is not None and actual_str != ""
+    val_actual = parse_eco_value(actual_str)
+    val_forecast = parse_eco_value(forecast_str)
+    val_prev = parse_eco_value(previous_str)
+    context_str = ""
+    bias = "Neutral"
+    if is_happened:
+        if val_actual is not None and val_forecast is not None:
+            context_str = f"Actual ({actual_str}) vs Forecast ({forecast_str})"
+            delta = val_actual - val_forecast
+            pct_dev = abs(delta / val_forecast) if val_forecast != 0 else 1.0
+            if pct_dev < 0.02: bias = "Mean Reverting"
+            elif delta > 0: bias = "Bullish"
+            else: bias = "Bearish"
+        else: context_str = f"Actual: {actual_str}"
+    else:
+        if val_forecast is not None and val_prev is not None:
+            context_str = f"Forecast ({forecast_str}) vs Prev ({previous_str})"
+            delta = val_forecast - val_prev
+            pct_dev = abs(delta / val_prev) if val_prev != 0 else 1.0
+            if pct_dev < 0.02: bias = "Mean Reverting"
+            elif delta > 0: bias = "Bullish Exp."
+            else: bias = "Bearish Exp."
+        else: context_str = "Waiting for Data..."
+    return context_str, bias
+
 with col_eco:
     st.markdown("### 📅 ECONOMIC EVENTS (USD)")
     if use_demo_data:
@@ -1226,13 +356,12 @@ with col_eco:
             elif 'Mean' in val: color = '#cccc00'
             return f'color: {color}'
         if not df_cal.empty: 
-            # FIX 3: Use applymap for broad compatibility
             st.dataframe(df_cal.style.applymap(color_bias, subset=['BIAS']), use_container_width=True, hide_index=True)
     else: st.info("NO HIGH IMPACT USD EVENTS SCHEDULED.")
 with col_news:
     st.markdown(f"### 📰 {asset_info.get('news_query', 'LATEST')} WIRE & SENTIMENT")
     
-    if HAS_NLP and not news_sentiment_df.empty:
+    if ai.HAS_NLP and not news_sentiment_df.empty:
          fig_sent = go.Figure()
          fig_sent.add_trace(go.Scatter(
              x=news_sentiment_df.index, 
@@ -1251,7 +380,7 @@ with col_news:
              yaxis=dict(showgrid=True, gridcolor="#333")
          )
          st.plotly_chart(fig_sent, use_container_width=True)
-    elif not HAS_NLP:
+    elif not ai.HAS_NLP:
         st.warning("Install `textblob` to enable Sentiment Analysis.")
     
     tab_gen, tab_ff = st.tabs(["📰 GENERAL", "⚡ FOREX FACTORY"])
@@ -1274,13 +403,13 @@ st.markdown("### 🇺🇸 FED LIQUIDITY & MACRO (FRED)")
 macro_context_data = {} 
 if fred_key:
     # 1. Fetch Key Series
-    df_yield = get_fred_series("T10Y2Y", fred_key)
-    df_ff = get_fred_series("FEDFUNDS", fred_key)
-    df_cpi = get_fred_series("CPIAUCSL", fred_key)
-    df_m2 = get_fred_series("M2SL", fred_key)
+    df_yield = de.get_fred_series("T10Y2Y", fred_key)
+    df_ff = de.get_fred_series("FEDFUNDS", fred_key)
+    df_cpi = de.get_fred_series("CPIAUCSL", fred_key)
+    df_m2 = de.get_fred_series("M2SL", fred_key)
     
     # 2. Macro ML Regime Engine
-    macro_regime = get_macro_ml_regime(df_cpi, df_ff)
+    macro_regime = qe.get_macro_ml_regime(df_cpi, df_ff)
     
     # 3. Store for AI
     if not df_yield.empty: macro_context_data['yield_curve'] = f"{df_yield['value'].iloc[-1]:.2f}"
@@ -1373,7 +502,7 @@ else:
 # --- 4. RISK ANALYSIS & BACKTEST ---
 st.markdown("---")
 st.markdown("### ⚡ QUANTITATIVE RISK & EXECUTION")
-strat_perf = run_strategy_backtest(asset_info['ticker'])
+strat_perf = qe.run_strategy_backtest(asset_info['ticker'])
 if not intraday_data.empty and strat_perf:
     q1, q2, q3 = st.columns([1, 2, 2])
     with q1:
@@ -1401,7 +530,7 @@ if not intraday_data.empty and strat_perf:
 
 # --- 5. VWAP EXECUTION ---
 st.markdown("#### 🎯 SESSION VWAP + KEY LEVELS")
-vwap_df = calculate_vwap_bands(intraday_data)
+vwap_df = qe.calculate_vwap_bands(intraday_data)
 if not vwap_df.empty:
     fig_vwap = go.Figure()
     fig_vwap.add_trace(go.Candlestick(x=vwap_df.index, open=vwap_df['Open'], high=vwap_df['High'], low=vwap_df['Low'], close=vwap_df['Close'], name="Price"))
@@ -1472,8 +601,8 @@ else: st.warning("GEX Data Unavailable for this asset.")
 # --- 7. MONTE CARLO & ADVANCED SEASONALITY ---
 st.markdown("---")
 st.markdown("### 🎲 SIMULATION & TIME ANALYSIS")
-pred_dates, pred_paths = generate_monte_carlo(daily_data)
-stats = get_seasonality_stats(daily_data, asset_info['ticker']) 
+pred_dates, pred_paths = qe.generate_monte_carlo(daily_data)
+stats = qe.get_seasonality_stats(daily_data, asset_info['ticker']) 
 if stats:
     st.markdown("#### ⏳ SEASONAL TENDENCIES")
     tab_hour, tab_day, tab_week = st.tabs(["HOUR (NY)", "DAY", "WEEK"])
@@ -1511,14 +640,27 @@ if pred_dates is not None and pred_paths is not None:
 st.markdown("---")
 st.markdown("### 🏛️ COT QUANT TERMINAL")
 
+def generate_cot_analysis(spec_net, hedge_net, spec_label, hedge_label):
+    spec_sent = "🟢 BULLISH" if spec_net > 0 else "🔴 BEARISH"
+    hedge_sent = "🟢 BULLISH" if hedge_net > 0 else "🔴 BEARISH"
+    if (spec_net > 0 and hedge_net < 0) or (spec_net < 0 and hedge_net > 0):
+        structure = "✅ **Healthy Structure:** Speculators and Hedgers are on opposite sides (Risk Transfer active)."
+    else:
+        structure = "⚠️ **Anomaly:** Both groups are positioned in the same direction. Watch for liquidity gaps."
+    return f"""
+    * **{spec_label}:** {spec_sent} (Net: {int(spec_net):,})
+    * **{hedge_label}:** {hedge_sent} (Net: {int(hedge_net):,})
+    {structure}
+    """
+
 # 1. Fetch Historical Data
 with st.spinner("Analyzing CFTC Data..."):
-    cot_history = fetch_cot_history(selected_asset, start_year=2024)
+    cot_history = de.fetch_cot_history(selected_asset, start_year=2024)
 
 if cot_history is not None and not cot_history.empty:
     
     # 2. Process Data for Metrics
-    cot_config = COT_MAPPING[selected_asset]
+    cot_config = config.COT_MAPPING[selected_asset]
     spec_label, hedge_label = cot_config['labels']
     
     if all(c in cot_history.columns for c in ['spec_long', 'spec_short', 'hedge_long', 'hedge_short']):
@@ -1526,7 +668,7 @@ if cot_history is not None and not cot_history.empty:
         # Calculations
         cot_history['Net Speculator'] = cot_history['spec_long'] - cot_history['spec_short']
         cot_history['Net Hedger'] = cot_history['hedge_long'] - cot_history['hedge_short']
-        cot_history['Spec Z-Score'] = calculate_z_score(cot_history['Net Speculator'])
+        cot_history['Spec Z-Score'] = qe.calculate_z_score(cot_history['Net Speculator'])
         
         latest_cot = cot_history.iloc[-1]
         prev_cot = cot_history.iloc[-2] if len(cot_history) > 1 else latest_cot
@@ -1618,7 +760,7 @@ if gemini_key:
     with col_exec_btn:
         if st.button("📝 GENERATE BRIEF"):
             with st.spinner("Analyzing Technicals + Macro..."):
-                narrative = get_technical_narrative(
+                narrative = ai.get_technical_narrative(
                     ticker=selected_asset, price=curr, daily_pct=pct, regime=regime_data,
                     ml_signal=ml_signal_str, gex_data=gex_summary, cot_data=cot_data,
                     levels=key_levels, macro_data=macro_context_data, api_key=gemini_key
@@ -1641,7 +783,7 @@ if gemini_key:
     with col_thesis_btn:
         if st.button("🔎 DEEP DIVE THESIS"):
             with st.spinner("Analyzing Macro, Gamma, and Order Flow..."):
-                thesis_text = generate_deep_dive_thesis(
+                thesis_text = ai.generate_deep_dive_thesis(
                     ticker=selected_asset, price=curr, change=pct, regime=regime_data,
                     ml_signal=ml_signal_str, gex_data=gex_summary, cot_data=cot_data,
                     levels=key_levels, news_summary=news_text_summary, macro_data=macro_context_data, api_key=gemini_key
