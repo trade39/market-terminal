@@ -11,7 +11,7 @@ import quant_engine as qe
 import ai_engine as ai
 
 # --- APP CONFIGURATION ---
-st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V5.18", page_icon="⚡")
+st.set_page_config(layout="wide", page_title="Bloomberg Terminal Pro V5.20", page_icon="⚡")
 st.markdown(config.CSS_STYLE, unsafe_allow_html=True)
 
 # --- SESSION STATE INITIALIZATION ---
@@ -67,14 +67,11 @@ with st.sidebar:
         st.rerun()
 
 # --- MAIN DASHBOARD ---
-st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V5.18</span></h1>", unsafe_allow_html=True)
+st.markdown(f"<h1 style='border-bottom: 2px solid #ff9900;'>{selected_asset} <span style='font-size:0.5em; color:white;'>TERMINAL PRO V5.20</span></h1>", unsafe_allow_html=True)
 
 # Fetch Data
 daily_data = de.get_daily_data(asset_info['ticker'])
-
-# FIX: FETCH DXY FROM FRED (DTWEXAFEGS)
 dxy_data = de.get_dxy_data(fred_key) 
-
 intraday_data = de.get_intraday_data(asset_info['ticker'])
 eco_events = de.get_economic_calendar(rapid_key, use_demo=use_demo_data)
 
@@ -83,20 +80,25 @@ news_general = de.get_financial_news_general(news_key, query=asset_info.get('new
 news_ff = de.get_forex_factory_news(rapid_key, 'breaking')
 combined_news_for_llm = news_general[:5] + news_ff[:5]
 
-# Engines
+# Engines (Advanced)
 _, ml_prob = qe.get_ml_prediction(asset_info['ticker'])
 gex_df, gex_date, gex_spot, current_iv = qe.get_gex_profile(asset_info['opt_ticker'])
 vol_profile, poc_price = qe.calculate_volume_profile(intraday_data)
 hurst = qe.calculate_hurst(daily_data['Close'].values) if not daily_data.empty else 0.5
 regime_data = qe.get_market_regime(asset_info['ticker'])
-tech_radar = qe.calculate_technical_radar(daily_data)
 correlations = qe.get_correlations(asset_info['ticker'], fred_key)
 news_sentiment_df = ai.calculate_news_sentiment(combined_news_for_llm)
 
-# Initialize COT Data for AI (prevents scope crash)
+# NEW: Multilayer Engines
+ms_df, ms_trend, ms_last_sh, ms_last_sl = qe.detect_market_structure(daily_data)
+vol_cone = qe.get_volatility_cone(daily_data)
+of_df, of_bias = qe.calculate_order_flow_proxy(daily_data)
+active_fvgs = qe.detect_fair_value_gaps(daily_data)
+
+# Initialize COT Data for AI
 cot_data = None 
 
-# --- 1. OVERVIEW ---
+# --- 1. OVERVIEW & MULTILAYER QUANT SETUP ---
 if not daily_data.empty:
     close, high, low = daily_data['Close'], daily_data['High'], daily_data['Low']
     curr = close.iloc[-1]
@@ -136,7 +138,7 @@ if not daily_data.empty:
     
     c4.metric("HIGH/LOW", f"{high.max():,.2f} / {low.min():,.2f}")
     
-    # --- CHART: DXY OVERLAY ---
+    # --- CHART: MULTILAYER LIQUIDITY MAP ---
     fig = go.Figure()
     
     # Trace 1: Asset Candlesticks
@@ -149,10 +151,31 @@ if not daily_data.empty:
         name="Price"
     ))
     
+    # Trace 2: Fair Value Gaps (Rectangles)
+    for fvg in active_fvgs:
+        color = "rgba(0, 255, 0, 0.2)" if "Bullish" in fvg['type'] else "rgba(255, 0, 0, 0.2)"
+        fig.add_shape(type="rect",
+            x0=fvg['date'], x1=daily_data.index[-1],
+            y0=fvg['bottom'], y1=fvg['top'],
+            fillcolor=color, line_width=0,
+        )
+
+    # Trace 3: Swing Points (Structure)
+    sh_mask = ms_df['Structure'] == 'SH'
+    sl_mask = ms_df['Structure'] == 'SL'
+    fig.add_trace(go.Scatter(
+        x=ms_df[sh_mask].index, y=ms_df[sh_mask]['High'], 
+        mode='markers', marker=dict(symbol='triangle-down', size=8, color='red'), name='Swing High'
+    ))
+    fig.add_trace(go.Scatter(
+        x=ms_df[sl_mask].index, y=ms_df[sl_mask]['Low'], 
+        mode='markers', marker=dict(symbol='triangle-up', size=8, color='green'), name='Swing Low'
+    ))
+
     if poc_price:
         fig.add_hline(y=poc_price, line_dash="dash", line_color="yellow", annotation_text="POC", annotation_position="bottom right")
 
-    # Trace 3: DXY Overlay (FRED)
+    # Trace 4: DXY Overlay (FRED)
     if not dxy_data.empty:
         dxy_aligned = dxy_data['Close'].reindex(daily_data.index, method='ffill')
         fig.add_trace(go.Scatter(
@@ -164,12 +187,12 @@ if not daily_data.empty:
             yaxis="y2"
         ))
 
-    # Layout Updates for Dual Axis
+    # Layout Updates
     fig.update_layout(
         template="plotly_dark",
         paper_bgcolor="#000000",
         plot_bgcolor="#000000",
-        height=400,
+        height=500,
         margin=dict(l=40, r=40, t=40, b=40),
         xaxis=dict(showgrid=True, gridcolor="#222", zerolinecolor="#222"),
         yaxis=dict(showgrid=True, gridcolor="#222", zerolinecolor="#222", title="Asset Price"),
@@ -188,37 +211,49 @@ if not daily_data.empty:
     fig.update_xaxes(rangeslider_visible=False)
     st.plotly_chart(fig, use_container_width=True)
 
-# --- 1B. TECHNICAL RADAR ---
+# --- 1B. QUANT MULTILAYER SETUP (REPLACES RETAIL RADAR) ---
 st.markdown("---")
-st.markdown("### 📡 TECHNICAL RADAR (TRIANGULATION)")
-if tech_radar:
-    tr1, tr2, tr3 = st.columns(3)
-    
-    with tr1:
-        st.markdown(f"""
-        <div class='terminal-box'>
-            <div style='color:gray; font-size:0.8em;'>MOMENTUM (RSI)</div>
-            <div style='font-size:1.5em;'>{tech_radar['RSI']['val']}</div>
-            <span class='{tech_radar['RSI']['col']}'>{tech_radar['RSI']['bias']}</span>
-        </div>
-        """, unsafe_allow_html=True)
-        
-    with tr2:
-        st.markdown(f"""
-        <div class='terminal-box'>
-            <div style='color:gray; font-size:0.8em;'>TREND (EMA)</div>
-            <div style='font-size:1.5em;'>{tech_radar['Trend']['val']}</div>
-            <span class='{tech_radar['Trend']['col']}'>{tech_radar['Trend']['bias']}</span>
-        </div>
-        """, unsafe_allow_html=True)
-    with tr3:
-        st.markdown(f"""
-        <div class='terminal-box'>
-            <div style='color:gray; font-size:0.8em;'>MACD (MOMENTUM)</div>
-            <div style='font-size:1.5em;'>{tech_radar['MACD']['val']}</div>
-            <span class='{tech_radar['MACD']['col']}'>{tech_radar['MACD']['bias']}</span>
-        </div>
-        """, unsafe_allow_html=True)
+st.markdown("### 🧬 QUANT MULTILAYER SETUP")
+
+ms_col, vol_col, of_col = st.columns(3)
+
+with ms_col:
+    trend_color = "bullish" if "BULLISH" in ms_trend else "bearish" if "BEARISH" in ms_trend else "neutral"
+    st.markdown(f"""
+    <div class='terminal-box'>
+        <div style='color:gray; font-size:0.8em;'>MARKET STRUCTURE (BOS/CHoCH)</div>
+        <div style='font-size:1.2em; font-weight:bold;'>{ms_trend}</div>
+        <hr style='margin:5px 0;'>
+        <div style='font-size:0.8em;'>Last Swing High: <span style='color:#ff3333'>{ms_last_sh:,.2f}</span></div>
+        <div style='font-size:0.8em;'>Last Swing Low: <span style='color:#00ff00'>{ms_last_sl:,.2f}</span></div>
+    </div>
+    """, unsafe_allow_html=True)
+
+with vol_col:
+    vol_regime = vol_cone.get('regime', 'N/A')
+    vol_rank = vol_cone.get('rank', 0.5)
+    v_color = "bullish" if "COMPRESSED" in vol_regime else "neutral"
+    st.markdown(f"""
+    <div class='terminal-box'>
+        <div style='color:gray; font-size:0.8em;'>VOLATILITY SURFACE (Garman-Klass)</div>
+        <div style='font-size:1.1em; font-weight:bold;'>{vol_regime}</div>
+        <hr style='margin:5px 0;'>
+        <div style='font-size:0.8em;'>Percentile Rank: {vol_rank*100:.0f}%</div>
+        <progress value="{int(vol_rank*100)}" max="100" style="width:100%; height:5px;"></progress>
+    </div>
+    """, unsafe_allow_html=True)
+
+with of_col:
+    of_color = "bullish" if "Buying" in of_bias else "bearish"
+    st.markdown(f"""
+    <div class='terminal-box'>
+        <div style='color:gray; font-size:0.8em;'>ORDER FLOW PROXY (Pressure)</div>
+        <div style='font-size:1.2em; font-weight:bold;' class='{of_color}'>{of_bias}</div>
+        <hr style='margin:5px 0;'>
+        <div style='font-size:0.8em;'>Vol-Weighted Impulse logic</div>
+        <div style='font-size:0.8em; color:gray;'>Detects Aggression vs Absorption</div>
+    </div>
+    """, unsafe_allow_html=True)
 
 # --- 1C. COINGECKO INTEGRATION ---
 cg_id = asset_info.get('cg_id')
@@ -498,7 +533,6 @@ if fred_key:
             </div>
             """, unsafe_allow_html=True)
         else:
-            # IMPROVED ERROR MESSAGING
             if not fred_key:
                 st.warning("MISSING API KEY: Add 'fred_api_key' to secrets.")
             else:
