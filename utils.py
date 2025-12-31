@@ -43,16 +43,35 @@ def safe_yf_download(tickers, period, interval, retries=3):
     return pd.DataFrame()
 
 def terminal_chart_layout(fig, title="", height=350):
-    """Standardized Bloomberg-style chart layout."""
+    """
+    Standardized Chart Layout - Monochromatic Navy/Cyan Theme
+    Background: #12161F (Matches Cards)
+    Grid: #333333
+    Text: #CCCCCC
+    """
     fig.update_layout(
-        title=dict(text=title, font=dict(color="#ff9900", family="Arial")),
+        title=dict(text=title, font=dict(color="#FFFFFF", family="Arial")),
         template="plotly_dark",
-        paper_bgcolor="#000000",
-        plot_bgcolor="#000000",
+        paper_bgcolor="#12161F", # Card background
+        plot_bgcolor="#12161F",  # Chart area background
         height=height,
         margin=dict(l=40, r=40, t=40, b=40),
-        xaxis=dict(showgrid=True, gridcolor="#222", zerolinecolor="#222"),
-        yaxis=dict(showgrid=True, gridcolor="#222", zerolinecolor="#222"),
-        font=dict(family="Courier New", color="#e0e0e0")
+        xaxis=dict(
+            showgrid=True, 
+            gridcolor="#333333", 
+            zerolinecolor="#444444",
+            tickfont=dict(color="#AAAAAA")
+        ),
+        yaxis=dict(
+            showgrid=True, 
+            gridcolor="#333333", 
+            zerolinecolor="#444444",
+            tickfont=dict(color="#AAAAAA")
+        ),
+        font=dict(family="Courier New", color="#CCCCCC"),
+        legend=dict(
+            bgcolor="rgba(0,0,0,0)",
+            font=dict(color="#CCCCCC")
+        )
     )
     return fig
